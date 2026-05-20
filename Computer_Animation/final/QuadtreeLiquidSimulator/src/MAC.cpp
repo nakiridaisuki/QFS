@@ -7,12 +7,11 @@ MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
     v.resize(nx * (ny + 1), 0.0);
     p.resize(nx * ny, 0.0);
     dye.resize(nx * ny, 0.0);
-
-    initEigen();
 }
 
 void MACSimulator::update(float dt) {
     advect(dt);
+    applyGravity(dt);
     setBoundaries();
     project();
     setBoundaries();
@@ -34,44 +33,55 @@ void MACSimulator::addForce(
     }
 }
 
-// PRIVATE
-void MACSimulator::initEigen() {
-    int N = nx * ny;
-    A.resize(N, N);
-    std::vector<Eigen::Triplet<double>> triplets;
-
+void MACSimulator::initCircle(float cx, float cy, float radius) {
     for (int j = 0; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
-            int idx = IX(i, j);
-
-            int count = 0;
-            if (i > 0) {
-                triplets.push_back({idx, IX(i - 1, j), -1.0});
-                count++;
+            double dist2 = (i - cx) * (i - cx) + (j - cy) * (j - cy);
+            if (dist2 <= radius * radius) {
+                dye[IX(i, j)] = 2.0; // 設定液體濃度 (質量)
             }
-            if (i < nx - 1) {
-                triplets.push_back({idx, IX(i + 1, j), -1.0});
-                count++;
-            }
-            if (j > 0) {
-                triplets.push_back({idx, IX(i, j - 1), -1.0});
-                count++;
-            }
-            if (j < ny - 1) {
-                triplets.push_back({idx, IX(i, j + 1), -1.0});
-                count++;
-            }
-
-            double diag = (double)count;
-            if (idx == 0) {
-                diag += 1.0;
-            }
-            triplets.push_back({idx, idx, diag});
         }
     }
-    A.setFromTriplets(triplets.begin(), triplets.end());
-    solver.compute(A);
 }
+
+// PRIVATE
+// void MACSimulator::initEigen() {
+//     int N = nx * ny;
+//     A.resize(N, N);
+//     std::vector<Eigen::Triplet<double>> triplets;
+//
+//     for (int j = 0; j < ny; j++) {
+//         for (int i = 0; i < nx; i++) {
+//             int idx = IX(i, j);
+//
+//             int count = 0;
+//             if (i > 0) {
+//                 triplets.push_back({idx, IX(i - 1, j), -1.0});
+//                 count++;
+//             }
+//             if (i < nx - 1) {
+//                 triplets.push_back({idx, IX(i + 1, j), -1.0});
+//                 count++;
+//             }
+//             if (j > 0) {
+//                 triplets.push_back({idx, IX(i, j - 1), -1.0});
+//                 count++;
+//             }
+//             if (j < ny - 1) {
+//                 triplets.push_back({idx, IX(i, j + 1), -1.0});
+//                 count++;
+//             }
+//
+//             double diag = (double)count;
+//             if (idx == 0) {
+//                 diag += 1.0;
+//             }
+//             triplets.push_back({idx, idx, diag});
+//         }
+//     }
+//     A.setFromTriplets(triplets.begin(), triplets.end());
+//     solver.compute(A);
+// }
 
 void MACSimulator::setBoundaries() {
     for (int j = 0; j < ny; j++) {
@@ -95,7 +105,7 @@ void MACSimulator::advect(float dt) {
             double v_avg = (v[IX_v(i, j)] + v[IX_v(i, j + 1)]) * 0.5;
             double x_prev = i - u_avg * dt;
             double y_prev = j - v_avg * dt;
-            next_dye[IX(i, j)] = bilerp(dye, nx, ny, x_prev, y_prev) * 0.995;
+            next_dye[IX(i, j)] = bilerp(dye, nx, ny, x_prev, y_prev);
         }
     }
 
@@ -140,18 +150,71 @@ void MACSimulator::advect(float dt) {
 void MACSimulator::project() {
     int N = nx * ny;
     Eigen::VectorXd div(N);
+    div.setZero();
+    std::vector<Eigen::Triplet<double>> triplets;
+
+    const float FLUID_THRESHOLD = 0.05;
 
     for (int j = 0; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
+            int idx = IX(i, j);
+
+            if(dye[idx] < FLUID_THRESHOLD){
+                triplets.push_back({idx, idx, 1.0});
+                div[idx] = 0.0;
+                continue;
+            }
+
             double d = u[IX_u(i + 1, j)] -
                        u[IX_u(i, j)] +
                        v[IX_v(i, j + 1)] -
                        v[IX_v(i, j)];
             div[IX(i, j)] = -d;
+
+            int count = 0;
+            if (i > 0) {
+                if (dye[IX(i-1, j)] > FLUID_THRESHOLD) {
+                    triplets.push_back({idx, IX(i - 1, j), -1.0});
+                }
+                count++;
+            }
+            if (i < nx - 1) {
+                if (dye[IX(i+1, j)] > FLUID_THRESHOLD) {
+                    triplets.push_back({idx, IX(i + 1, j), -1.0});
+                }
+                count++;
+            }
+            if (j > 0) {
+                if (dye[IX(i, j-1)] > FLUID_THRESHOLD) {
+                    triplets.push_back({idx, IX(i, j - 1), -1.0});
+                }
+                count++;
+            }
+            if (j < ny - 1) {
+                if (dye[IX(i, j+1)] > FLUID_THRESHOLD) {
+                    triplets.push_back({idx, IX(i, j + 1), -1.0});
+                }
+                count++;
+            }
+
+            // double diag = (double)count;
+            // if (idx == 0) {
+            //     diag += 1.0;
+            // }
+            triplets.push_back({idx, idx, (double)count});
         }
     }
+    // Eigen solvers
+    Eigen::SparseMatrix<double> A(N, N);
+    A.setFromTriplets(triplets.begin(), triplets.end());
 
+    Eigen::ConjugateGradient<
+        Eigen::SparseMatrix<double>,
+        Eigen::Lower | Eigen::Upper>
+        solver;
+    solver.compute(A);
     Eigen::VectorXd pressure = solver.solve(div);
+
     for (int i = 0; i < N; i++)
         p[i] = pressure[i];
 
@@ -163,6 +226,23 @@ void MACSimulator::project() {
     for (int j = 1; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
             v[IX_v(i, j)] -= (p[IX(i, j)] - p[IX(i, j - 1)]);
+        }
+    }
+}
+
+void MACSimulator::applyGravity(float dt) {
+    double gravity = 150.0; // 重力常數，數值越大掉得越快
+
+    for (int j = 1; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            // v 速度位於網格水平邊界上，所以我們取上下兩個網格染料的平均值作為「質量」
+            double mass = (dye[IX(i, j)] + dye[IX(i, j - 1)]) * 0.5;
+
+            if (mass > 1e-6) {
+                v[IX_v(i, j)] += 1 * gravity * dt;
+            }
+            
+            // F = m * g，只對有染料的地方加上往下的速度 (Y軸正向朝下)
         }
     }
 }

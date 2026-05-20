@@ -1,7 +1,6 @@
 #include "MAC.h"
 #include "raylib.h"
 #include <algorithm>
-#include <iostream>
 
 // 將 Renderer 直接寫在 main 檔案中，保持專案輕量
 class FluidRenderer {
@@ -55,7 +54,7 @@ int main() {
     const int screenHeight = 600;
 
     // 建立 100x75 的物理網格 (數字越大算越慢，但畫面越細緻)
-    MACSimulator sim(120, 90);
+    MACSimulator sim(80, 60);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
 
     InitWindow(
@@ -63,10 +62,15 @@ int main() {
     );
     SetTargetFPS(60);
 
+    sim.initCircle(sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f);
+
     Vector2 prevMousePos = GetMousePosition();
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
+        if (dt > 0.05) {
+            dt = 0.05;
+        }
 
         // 1. 處理滑鼠輸入
         Vector2 mousePos = GetMousePosition();

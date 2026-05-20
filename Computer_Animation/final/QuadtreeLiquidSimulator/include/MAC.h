@@ -15,12 +15,12 @@ class MACSimulator {
     // dye for renderer
     std::vector<double> u, v, p, dye;
 
-    // Eigen solvers
-    Eigen::SparseMatrix<double> A;
-    Eigen::ConjugateGradient<
-        Eigen::SparseMatrix<double>,
-        Eigen::Lower | Eigen::Upper>
-        solver;
+    // // Eigen solvers
+    // Eigen::SparseMatrix<double> A;
+    // Eigen::ConjugateGradient<
+    //     Eigen::SparseMatrix<double>,
+    //     Eigen::Lower | Eigen::Upper>
+    //     solver;
 
     // index calculator
     int IX(int i, int j) const { return i + j * nx; }
@@ -28,10 +28,10 @@ class MACSimulator {
     int IX_v(int i, int j) const { return i + j * nx; }
 
     // main simulation functions
-    void initEigen();
     void setBoundaries();
     void advect(float dt);
     void project();
+    void applyGravity(float dt);
 
     // util functions
     double bilerp(
@@ -45,6 +45,7 @@ class MACSimulator {
     void addForce(
         float x, float y, float dx, float dy, float radius
     ); // add force and dye
+    void initCircle(float cx, float cy, float radis);
 
     // get functions for renderer
     int getWidth() const { return nx; }

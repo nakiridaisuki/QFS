@@ -2,104 +2,178 @@
 #include "raylib.h"
 #include <algorithm>
 
-// 將 Renderer 直接寫在 main 檔案中，保持專案輕量
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+
 class FluidRenderer {
   private:
     const MACSimulator &sim;
     int screenWidth, screenHeight;
-    float cellWidth, cellHeight;
+    Image image;
+    Texture2D texture;
+    Color *pixels;
 
   public:
     FluidRenderer(const MACSimulator &sim, int screenW, int screenH)
         : sim(sim), screenWidth(screenW), screenHeight(screenH) {
-        cellWidth = (float)screenWidth / sim.getWidth();
-        cellHeight = (float)screenHeight / sim.getHeight();
+
+        // 建立與模擬網格大小相同的 Image
+        pixels = new Color[sim.getWidth() * sim.getHeight()];
+        image = {
+            pixels,
+            sim.getWidth(),
+            sim.getHeight(),
+            1,
+            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+        };
+        texture = LoadTextureFromImage(image);
+    }
+
+    ~FluidRenderer() {
+        UnloadTexture(texture);
+        delete[] pixels;
     }
 
     void draw() {
-        const auto &dye = sim.getDye();
+        const auto &celltype = sim.getCell();
         int nx = sim.getWidth();
         int ny = sim.getHeight();
 
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                // 讀取這格的染料濃度
-                double d = dye[i + j * nx];
-                if (d > 0.01) {
-                    // 將濃度映射到顏色 (我們畫出科技感的藍綠色螢光水流)
-                    unsigned char intensity =
-                        (unsigned char)std::min(255.0, d * 50.0);
-                    Color c = {
-                        0,
-                        intensity,
-                        (unsigned char)std::min(255, intensity + 50),
-                        255
-                    };
-
-                    DrawRectangle(
-                        (int)(i * cellWidth),
-                        (int)(j * cellHeight),
-                        (int)cellWidth + 1,
-                        (int)cellHeight + 1,
-                        c
-                    );
-                }
+        // 在 CPU 端快速填充像素
+        for (int i = 0; i < nx * ny; ++i) {
+            if (celltype[i]) {
+                pixels[i] = Color{0, 50, 100, 255}; // 你的科技螢光藍
+            } else {
+                pixels[i] = BLANK; // 透明或黑色
             }
         }
+
+        // 一次性將資料送給 GPU
+        UpdateTexture(texture, pixels);
+
+        // 放大畫回螢幕上
+        Rectangle source = {0, 0, (float)nx, (float)ny};
+        Rectangle dest = {0, 0, (float)screenWidth, (float)screenHeight};
+        DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
     }
 };
 
 int main() {
-    const int screenWidth = 800;
-    const int screenHeight = 600;
-
-    // 建立 100x75 的物理網格 (數字越大算越慢，但畫面越細緻)
-    MACSimulator sim(80, 60);
-    FluidRenderer renderer(sim, screenWidth, screenHeight);
+    const int screenWidth = 1200;
+    const int screenHeight = 900;
+    const int simWidth = screenWidth;
+    const int simHeight = screenHeight;
+    const int FPS = 60;
 
     InitWindow(
         screenWidth, screenHeight, "MAC Grid Fluid Simulation - Stable Fluids"
     );
-    SetTargetFPS(60);
+    SetTargetFPS(FPS);
 
-    sim.initCircle(sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f);
+    MACSimulator sim(simWidth, simHeight, FPS);
+    FluidRenderer renderer(sim, screenWidth, screenHeight);
 
-    Vector2 prevMousePos = GetMousePosition();
+    // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)
+    GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
+
+    sim.addWater(sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f);
+
+    // === UI 需要的參數變數 ===
+    float brushRadius = 4.0f;
+    float gravity = sim.getGravity();
+    bool showUI = true;
+    int iterations = 1;
+    // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
+    Rectangle uiPanelRec = {10, 60, 260, 150};
 
     while (!WindowShouldClose()) {
-        float dt = GetFrameTime();
-        if (dt > 0.05) {
-            dt = 0.05;
-        }
-
-        // 1. 處理滑鼠輸入
         Vector2 mousePos = GetMousePosition();
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            // 計算滑鼠移動的向量 (力道)
-            float dx = mousePos.x - prevMousePos.x;
-            float dy = mousePos.y - prevMousePos.y;
 
-            // 將螢幕座標轉換為「物理網格的索引座標」
+        // 判斷滑鼠是不是在 UI 面板上
+        bool isMouseOnUI =
+            showUI && CheckCollisionPointRec(mousePos, uiPanelRec);
+
+        // 3. 處理滑鼠輸入 (只有滑鼠不在 UI 上時才加水)
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !isMouseOnUI) {
             float gridX = mousePos.x / (screenWidth / (float)sim.getWidth());
             float gridY = mousePos.y / (screenHeight / (float)sim.getHeight());
 
-            sim.addForce(gridX, gridY, dx, dy, 4.0f); // 半徑 4.0 格
+            // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
+            sim.addWater(gridX, gridY, brushRadius);
         }
-        prevMousePos = mousePos;
+        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !isMouseOnUI) {
+            float gridX = mousePos.x / (screenWidth / (float)sim.getWidth());
+            float gridY = mousePos.y / (screenHeight / (float)sim.getHeight());
 
-        // 2. 更新物理引擎
-        sim.update(dt);
+            // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
+            sim.delWater(gridX, gridY, brushRadius);
+        }
 
-        // 3. 渲染畫面
+        float frameTime = std::min(GetFrameTime(), 0.0333f);
+        float dt = frameTime / (float)iterations;
+        for (int iter = 0; iter < iterations; iter++) {
+            sim.update(dt);
+        }
+
+        // 4. 渲染畫面與 UI
         BeginDrawing();
-        ClearBackground(BLACK); // 黑底讓螢光染料更明顯
+        ClearBackground(BLACK);
 
         renderer.draw();
 
+        // 畫一點基本的文字
         DrawText(
             "Click and Drag to interact with fluid!", 10, 10, 20, LIGHTGRAY
         );
         DrawFPS(10, 35);
+
+        // === 繪製 UI 面板 ===
+        GuiCheckBox(Rectangle{250, 10, 20, 20}, "Show UI", &showUI);
+
+        if (showUI) {
+            // 畫一個半透明的背景板，讓 UI 更清楚
+            DrawRectangleRec(uiPanelRec, Fade(DARKGRAY, 0.8f));
+
+            // 加入滑桿 Slider (Bounds, 左邊文字, 右邊文字顯示數值, 變數指標,
+            // 最小值, 最大值)
+            GuiSlider(
+                Rectangle{100, 70, 120, 20},
+                "Brush Size",
+                TextFormat("%.1f", brushRadius),
+                &brushRadius,
+                1.0f,
+                200.0f
+            );
+
+            GuiSlider(
+                Rectangle{100, 130, 120, 20},
+                "Gravity",
+                TextFormat("%.0f", gravity),
+                &gravity,
+                0.0f,
+                1000.0f
+            );
+
+            GuiSpinner(
+                Rectangle{100, 150, 120, 20},
+                "Iteration times",
+                &iterations,
+                0,
+                10,
+                false
+            );
+
+            sim.setGravity(gravity);
+
+            // 你也可以在這邊加一顆按鈕來重置場景
+            if (GuiButton(Rectangle{100, 170, 120, 30}, "Reset Fluid")) {
+                sim.reset();
+                sim.addWater(
+                    sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f
+                );
+            }
+        }
+
         EndDrawing();
     }
 

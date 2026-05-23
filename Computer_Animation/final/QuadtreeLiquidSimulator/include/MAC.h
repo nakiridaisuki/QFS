@@ -12,8 +12,9 @@ struct Particle {
 class MACSimulator {
   private:
     int nx, ny;
-    int fps;
-    float G; // Gravity const
+    float G;     // Gravity const
+    float Sigma; // surface tension
+    float max_u, max_v;
 
     // MAC grid data
     // u for row velocity
@@ -37,8 +38,10 @@ class MACSimulator {
     // main simulation functions
     void particleToGrid();
     void gridToParticle();
+    void velExtrapolation();
     void advectParticles(float dt);
     void applyGravity(float dt);
+    void applySurfaceTension(float dt);
     void markFluidCells();
     void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
     void project();
@@ -52,7 +55,7 @@ class MACSimulator {
     );
 
   public:
-    MACSimulator(int width, int height, int fps);
+    MACSimulator(int width, int height);
 
     void update(float dt);                         // update every frame
     void addWater(float x, float y, float radius); // add water and dye
@@ -63,10 +66,14 @@ class MACSimulator {
     int getWidth() const { return nx; }
     int getHeight() const { return ny; }
     float getGravity() { return G; }
+    float getSurfaceTension() { return Sigma; }
+    float getMaxVel() { return std::max(max_u, max_v); }
     const std::vector<int> &getCell() const { return cell_type; }
+    const std::vector<Particle> &getParticles() const { return particles; }
 
     // set functions
     void setGravity(float gravity) { G = gravity; }
+    void setSigma(float sigma) { Sigma = sigma; }
     void reset() {
         particles.clear();
         std::fill(u.begin(), u.end(), 0.0);

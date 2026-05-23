@@ -1,68 +1,17 @@
 #include "MAC.h"
-#include "raylib.h"
+#include "Renderer.h"
 #include <algorithm>
+#include <cmath>
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-class FluidRenderer {
-  private:
-    const MACSimulator &sim;
-    int screenWidth, screenHeight;
-    Image image;
-    Texture2D texture;
-    Color *pixels;
-
-  public:
-    FluidRenderer(const MACSimulator &sim, int screenW, int screenH)
-        : sim(sim), screenWidth(screenW), screenHeight(screenH) {
-
-        // 建立與模擬網格大小相同的 Image
-        pixels = new Color[sim.getWidth() * sim.getHeight()];
-        image = {
-            pixels,
-            sim.getWidth(),
-            sim.getHeight(),
-            1,
-            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
-        };
-        texture = LoadTextureFromImage(image);
-    }
-
-    ~FluidRenderer() {
-        UnloadTexture(texture);
-        delete[] pixels;
-    }
-
-    void draw() {
-        const auto &celltype = sim.getCell();
-        int nx = sim.getWidth();
-        int ny = sim.getHeight();
-
-        // 在 CPU 端快速填充像素
-        for (int i = 0; i < nx * ny; ++i) {
-            if (celltype[i]) {
-                pixels[i] = Color{0, 50, 100, 255}; // 你的科技螢光藍
-            } else {
-                pixels[i] = BLANK; // 透明或黑色
-            }
-        }
-
-        // 一次性將資料送給 GPU
-        UpdateTexture(texture, pixels);
-
-        // 放大畫回螢幕上
-        Rectangle source = {0, 0, (float)nx, (float)ny};
-        Rectangle dest = {0, 0, (float)screenWidth, (float)screenHeight};
-        DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
-    }
-};
-
 int main() {
     const int screenWidth = 1200;
     const int screenHeight = 900;
-    const int simWidth = screenWidth;
-    const int simHeight = screenHeight;
+    const int ratio = 2;
+    const int simWidth = screenWidth / ratio;
+    const int simHeight = screenHeight / ratio;
     const int FPS = 60;
 
     InitWindow(
@@ -70,7 +19,7 @@ int main() {
     );
     SetTargetFPS(FPS);
 
-    MACSimulator sim(simWidth, simHeight, FPS);
+    MACSimulator sim(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
 
     // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)
@@ -81,12 +30,18 @@ int main() {
     // === UI 需要的參數變數 ===
     float brushRadius = 4.0f;
     float gravity = sim.getGravity();
+    float tension = sim.getSurfaceTension();
     bool showUI = true;
     int iterations = 1;
+    float speed = 1.f;
+    int frame_cnt = 0;
+    bool showGrid = true;
+    bool showParticle = true;
     // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
     Rectangle uiPanelRec = {10, 60, 260, 150};
 
     while (!WindowShouldClose()) {
+        frame_cnt++;
         Vector2 mousePos = GetMousePosition();
 
         // 判斷滑鼠是不是在 UI 面板上
@@ -109,17 +64,27 @@ int main() {
             sim.delWater(gridX, gridY, brushRadius);
         }
 
-        float frameTime = std::min(GetFrameTime(), 0.0333f);
-        float dt = frameTime / (float)iterations;
-        for (int iter = 0; iter < iterations; iter++) {
-            sim.update(dt);
+        if (frame_cnt % (int)speed == 0) {
+            float frameTime = std::min(GetFrameTime(), 0.0333f);
+            float idel_dt;
+            if (sim.getMaxVel() == 0)
+                idel_dt = frameTime;
+            else
+                idel_dt = 1.f / sim.getMaxVel();
+            int idel_iter = std::ceil(frameTime / idel_dt);
+
+            int actual_iter = std::clamp(idel_iter, 1, iterations);
+            float actual_dt = frameTime / actual_iter;
+            for (int iter = 0; iter < actual_iter; iter++) {
+                sim.update(actual_dt);
+            }
         }
 
         // 4. 渲染畫面與 UI
         BeginDrawing();
         ClearBackground(BLACK);
 
-        renderer.draw();
+        renderer.draw(showGrid, showParticle);
 
         // 畫一點基本的文字
         DrawText(
@@ -146,10 +111,28 @@ int main() {
             );
 
             GuiSlider(
-                Rectangle{100, 130, 120, 20},
+                Rectangle{100, 90, 120, 20},
+                "Speed",
+                TextFormat("%.1f", speed),
+                &speed,
+                1.0f,
+                60.0f
+            );
+
+            GuiSlider(
+                Rectangle{100, 110, 120, 20},
                 "Gravity",
                 TextFormat("%.0f", gravity),
                 &gravity,
+                0.0f,
+                1000.0f
+            );
+
+            GuiSlider(
+                Rectangle{100, 130, 120, 20},
+                "Tension",
+                TextFormat("%.0f", tension),
+                &tension,
                 0.0f,
                 1000.0f
             );
@@ -164,9 +147,15 @@ int main() {
             );
 
             sim.setGravity(gravity);
+            sim.setSigma(tension);
 
-            // 你也可以在這邊加一顆按鈕來重置場景
-            if (GuiButton(Rectangle{100, 170, 120, 30}, "Reset Fluid")) {
+            GuiCheckBox(
+                Rectangle{100, 170, 20, 20}, "Show Particles", &showParticle
+            );
+            GuiCheckBox(Rectangle{100, 190, 20, 20}, "Show Grid", &showGrid);
+
+            // 把 Reset 按鈕稍微往下挪
+            if (GuiButton(Rectangle{100, 215, 120, 30}, "Reset Fluid")) {
                 sim.reset();
                 sim.addWater(
                     sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f

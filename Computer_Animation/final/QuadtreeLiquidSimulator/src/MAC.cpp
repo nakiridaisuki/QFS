@@ -2,10 +2,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <math.h>
+#include <vector>
 
 // PUBLIC
-MACSimulator::MACSimulator(int width, int height, int fps = 60)
-    : nx(width), ny(height), fps(fps) {
+MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
     u.resize((nx + 1) * ny, 0.0);
     v.resize(nx * (ny + 1), 0.0);
     u_old.resize((nx + 1) * ny, 0.0);
@@ -20,6 +20,7 @@ MACSimulator::MACSimulator(int width, int height, int fps = 60)
     triplets.reserve(nx * ny * 5);
     p.resize(nx * ny, 0.0);
     G = 150.f;
+    Sigma = 0.0f;
 
     solver.setMaxIterations(80);
     solver.setTolerance(1e-3);
@@ -27,8 +28,8 @@ MACSimulator::MACSimulator(int width, int height, int fps = 60)
 }
 
 void MACSimulator::update(float dt) {
-    static int fps_cnt = 0;
-    fps_cnt++;
+    max_u = 0.0f;
+    max_v = 0.0f;
 
     particleToGrid();
 
@@ -37,18 +38,20 @@ void MACSimulator::update(float dt) {
 
     setBoundaries(u_old, v_old);
 
-    markFluidCells();
     applyGravity(dt);
+    applySurfaceTension(dt);
 
     setBoundaries(u, v);
     project();
     setBoundaries(u, v);
 
+    velExtrapolation();
+
     gridToParticle();
 
-    resampleParticles();
-
     advectParticles(dt);
+    markFluidCells();
+    resampleParticles();
 }
 
 void MACSimulator::addWater(float x, float y, float radius) {
@@ -69,16 +72,17 @@ void MACSimulator::delWater(float x, float y, float radius) {
         });
 
     particles.erase(new_end, particles.end());
+    markFluidCells();
 }
 
 void MACSimulator::setBoundaries(
     std::vector<float> &ufield, std::vector<float> &vfield
 ) {
     for (int j = 0; j < ny; j++) {
-        if (ufield[IX_u(0, j)] < 0.f)
-            ufield[IX_u(0, j)] = 0.0;
-        if (ufield[IX_u(nx, j)] > 0.f)
-            ufield[IX_u(nx, j)] = 0.0;
+        // if (ufield[IX_u(0, j)] < 0.f)
+        ufield[IX_u(0, j)] = 0.0;
+        // if (ufield[IX_u(nx, j)] > 0.f)
+        ufield[IX_u(nx, j)] = 0.0;
     }
     for (int i = 0; i < nx; i++) {
         if (vfield[IX_v(i, 0)] < 0.f)
@@ -113,6 +117,99 @@ void MACSimulator::particleToGrid() {
     }
 }
 
+void MACSimulator::velExtrapolation() {
+    const int ext_layers = 3;
+    const int AIR = 99;
+
+    static std::vector<int> valid_u, valid_v;
+    valid_u.assign((nx + 1) * ny, AIR);
+    valid_v.assign(nx * (ny + 1), AIR);
+
+#pragma omp parallel for
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i <= nx; i++) {
+            bool fluid_left = (i > 0) && (cell_type[IX(i - 1, j)] == 1);
+            bool fluid_right = (i < nx) && (cell_type[IX(i, j)] == 1);
+            if (fluid_left || fluid_right) {
+                valid_u[IX_u(i, j)] = 1;
+            }
+        }
+    }
+
+#pragma omp parallel for
+    for (int j = 0; j <= ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            bool fluid_bottom = (j > 0) && (cell_type[IX(i, j - 1)] == 1);
+            bool fluid_top = (j < ny) && (cell_type[IX(i, j)] == 1);
+            if (fluid_bottom || fluid_top) {
+                valid_v[IX_v(i, j)] = 1;
+            }
+        }
+    }
+
+    for (int iter = 1; iter <= ext_layers; iter++) {
+        for (int j = 0; j < ny; j++) {
+            for (int i = 0; i <= nx; i++) {
+                if (valid_u[IX_u(i, j)] == AIR) {
+                    float sum = 0;
+                    int count = 0;
+                    if (i > 0 && valid_u[IX_u(i - 1, j)] <= iter) {
+                        sum += u[IX_u(i - 1, j)];
+                        count++;
+                    }
+                    if (i < nx && valid_u[IX_u(i + 1, j)] <= iter) {
+                        sum += u[IX_u(i + 1, j)];
+                        count++;
+                    }
+                    if (j > 0 && valid_u[IX_u(i, j - 1)] <= iter) {
+                        sum += u[IX_u(i, j - 1)];
+                        count++;
+                    }
+                    if (j < ny - 1 && valid_u[IX_u(i, j + 1)] <= iter) {
+                        sum += u[IX_u(i, j + 1)];
+                        count++;
+                    }
+
+                    if (count > 0) {
+                        u[IX_u(i, j)] = sum / (float)count;
+                        valid_u[IX_u(i, j)] = iter + 1;
+                    }
+                }
+            }
+        }
+
+        for (int j = 0; j <= ny; j++) {
+            for (int i = 0; i < nx; i++) {
+                if (valid_v[IX_v(i, j)] == AIR) {
+                    float sum = 0;
+                    int count = 0;
+                    if (i > 0 && valid_v[IX_v(i - 1, j)] <= iter) {
+                        sum += v[IX_v(i - 1, j)];
+                        count++;
+                    }
+                    if (i < nx - 1 && valid_v[IX_v(i + 1, j)] <= iter) {
+                        sum += v[IX_v(i + 1, j)];
+                        count++;
+                    }
+                    if (j > 0 && valid_v[IX_v(i, j - 1)] <= iter) {
+                        sum += v[IX_v(i, j - 1)];
+                        count++;
+                    }
+                    if (j < ny && valid_v[IX_v(i, j + 1)] <= iter) {
+                        sum += v[IX_v(i, j + 1)];
+                        count++;
+                    }
+
+                    if (count > 0) {
+                        v[IX_v(i, j)] = sum / (float)count;
+                        valid_v[IX_v(i, j)] = iter + 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 void MACSimulator::gridToParticle() {
     float flipRatio = 0.95f;
 
@@ -136,14 +233,24 @@ void MACSimulator::gridToParticle() {
 }
 
 void MACSimulator::advectParticles(float dt) {
-#pragma omp parallel for
+    float local_max_u = 0.0f;
+    float local_max_v = 0.0f;
+
+#pragma omp parallel for reduction(max : local_max_u)                          \
+    reduction(max : local_max_v)
     for (auto &p : particles) {
         p.x += p.u * dt;
         p.y += p.v * dt;
 
         p.x = std::max(0.001f, std::min(float(nx) - 0.001f, p.x));
         p.y = std::max(0.001f, std::min(float(ny) - 0.001f, p.y));
+
+        local_max_u = std::max(std::abs(p.u), max_u);
+        local_max_v = std::max(std::abs(p.v), max_v);
     }
+
+    max_u = local_max_u;
+    max_v = local_max_v;
 }
 
 void MACSimulator::project() {
@@ -236,9 +343,9 @@ void MACSimulator::project() {
 }
 
 void MACSimulator::applyGravity(float dt) {
-    for (int j = 0; j < ny; j++) {
+    for (int j = 0; j < ny + 1; j++) {
         for (int i = 0; i < nx; i++) {
-            if (cell_type[IX(i, j)] == 1 ||
+            if ((j < ny && cell_type[IX(i, j)] == 1) ||
                 (j > 0 && cell_type[IX(i, j - 1)] == 1)) {
                 v[IX_v(i, j)] += G * dt;
             }
@@ -246,13 +353,96 @@ void MACSimulator::applyGravity(float dt) {
     }
 }
 
+void MACSimulator::applySurfaceTension(float dt) {
+    if (Sigma <= 0.0f)
+        return;
+
+    static std::vector<float> phi[2];
+    phi[0].assign(nx * ny, 0.0f);
+    phi[1].assign(nx * ny, 0.0f);
+
+#pragma omp parallel for
+    for (int i = 0; i < nx * ny; i++) {
+        phi[0][i] = (float)cell_type[i];
+    }
+
+    for (int iter = 0; iter < 2; iter++) {
+#pragma omp parallel for
+        for (int j = 1; j < ny - 1; j++) {
+            for (int i = 1; i < nx - 1; i++) {
+                phi[1 - iter][IX(i, j)] = (phi[iter][IX(i, j)] * 4.0f +
+                                           phi[iter][IX(i - 1, j)] +
+                                           phi[iter][IX(i + 1, j)] +
+                                           phi[iter][IX(i, j - 1)] +
+                                           phi[iter][IX(i, j + 1)]) /
+                                          8.0f;
+            }
+        }
+    }
+
+    static std::vector<float> nx_n, ny_n;
+    nx_n.assign(nx * ny, 0.0f);
+    ny_n.assign(nx * ny, 0.0f);
+
+#pragma omp parallel for
+    for (int j = 1; j < ny - 1; ++j) {
+        for (int i = 1; i < nx - 1; ++i) {
+            // 利用中心差分計算梯度
+            float dx = (phi[0][IX(i + 1, j)] - phi[0][IX(i - 1, j)]) * 0.5f;
+            float dy = (phi[0][IX(i, j + 1)] - phi[0][IX(i, j - 1)]) * 0.5f;
+            float len =
+                std::sqrt(dx * dx + dy * dy + 1e-8f); // 加上 1e-8 避免除以零
+            nx_n[IX(i, j)] = dx / len;
+            ny_n[IX(i, j)] = dy / len;
+        }
+    }
+
+    static std::vector<float> kappa;
+    kappa.assign(nx * ny, 0.0f);
+
+#pragma omp parallel for
+    for (int j = 1; j < ny - 1; ++j) {
+        for (int i = 1; i < nx - 1; ++i) {
+            float div_x = (nx_n[IX(i + 1, j)] - nx_n[IX(i - 1, j)]) * 0.5f;
+            float div_y = (ny_n[IX(i, j + 1)] - ny_n[IX(i, j - 1)]) * 0.5f;
+            kappa[IX(i, j)] = -(div_x + div_y);
+        }
+    }
+
+#pragma omp parallel for
+    for (int j = 1; j < ny - 1; ++j) {
+        for (int i = 2; i < nx - 1; ++i) { // 避開最外圈邊界
+            // u 面的曲率取左右格子的平均
+            float k = (kappa[IX(i, j)] + kappa[IX(i - 1, j)]) * 0.5f;
+            // u 面的顏色梯度 (直接用相鄰兩格相減)
+            float grad_phi = phi[0][IX(i, j)] - phi[0][IX(i - 1, j)];
+
+            // F = sigma * kappa * grad(phi)
+            u[IX_u(i, j)] += dt * Sigma * k * grad_phi;
+        }
+    }
+
+#pragma omp parallel for
+    for (int j = 2; j < ny - 1; ++j) {
+        for (int i = 1; i < nx - 1; ++i) {
+            // v 面的曲率取上下格子的平均
+            float k = (kappa[IX(i, j)] + kappa[IX(i, j - 1)]) * 0.5f;
+            float grad_phi = phi[0][IX(i, j)] - phi[0][IX(i, j - 1)];
+
+            v[IX_v(i, j)] += dt * Sigma * k * grad_phi;
+        }
+    }
+}
+
 void MACSimulator::markFluidCells() {
     std::fill(cell_type.begin(), cell_type.end(), 0);
 
+#pragma omp parallel for
     for (const auto &p : particles) {
         int i = (int)p.x;
         int j = (int)p.y;
         if (i >= 0 && i < nx && j >= 0 && j < ny) {
+#pragma omp atomic write
             cell_type[IX(i, j)] = 1; // 1 = 液體
         }
     }
@@ -285,16 +475,19 @@ void MACSimulator::resampleParticles() {
         });
     particles.erase(new_end, particles.end());
 
-    for (int j = 1; j < ny - 1; j++) {
-        for (int i = 1; i < nx - 1; i++) {
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
             int idx = IX(i, j);
 
-            bool is_inter =
-                (cell_type[idx] &&
-                 cell_type[IX(i + 1, j)] &&
-                 cell_type[IX(i - 1, j)] &&
-                 cell_type[IX(i, j + 1)] &&
-                 cell_type[IX(i, j - 1)]);
+            bool is_inter = 1;
+            if (i < nx - 1)
+                is_inter &= cell_type[IX(i + 1, j)];
+            if (i > 0)
+                is_inter &= cell_type[IX(i - 1, j)];
+            if (j < ny - 1)
+                is_inter &= cell_type[IX(i, j + 1)];
+            if (j > 0)
+                is_inter &= cell_type[IX(i, j - 1)];
 
             if (is_inter && particles_count[idx] < min_ppc) {
                 int needed = target_ppc - particles_count[idx];
@@ -308,6 +501,7 @@ void MACSimulator::resampleParticles() {
 
                     particles.push_back({rx, ry, new_u, new_v});
                 }
+                cell_type[idx] = 1;
             }
         }
     }

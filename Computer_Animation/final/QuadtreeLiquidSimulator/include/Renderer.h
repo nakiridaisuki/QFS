@@ -1,0 +1,83 @@
+#include "MAC.h"
+#include <raylib.h>
+
+class FluidRenderer {
+  private:
+    const MACSimulator &sim;
+    int screenWidth, screenHeight;
+    Image image;
+    Texture2D texture;
+    Color *pixels;
+
+  public:
+    FluidRenderer(const MACSimulator &sim, int screenW, int screenH)
+        : sim(sim), screenWidth(screenW), screenHeight(screenH) {
+
+        // 建立與模擬網格大小相同的 Image
+        pixels = new Color[sim.getWidth() * sim.getHeight()];
+        image = {
+            pixels,
+            sim.getWidth(),
+            sim.getHeight(),
+            1,
+            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+        };
+        texture = LoadTextureFromImage(image);
+    }
+
+    ~FluidRenderer() {
+        UnloadTexture(texture);
+        delete[] pixels;
+    }
+
+    void draw(bool showGrid = false, bool showParticle = false) {
+        const auto &celltype = sim.getCell();
+        int nx = sim.getWidth();
+        int ny = sim.getHeight();
+
+        // 在 CPU 端快速填充像素
+        for (int i = 0; i < nx * ny; ++i) {
+            if (celltype[i]) {
+                pixels[i] = Color{0, 50, 100, 255}; // 你的科技螢光藍
+            } else {
+                pixels[i] = BLANK; // 透明或黑色
+            }
+        }
+
+        // 一次性將資料送給 GPU
+        UpdateTexture(texture, pixels);
+
+        // 放大畫回螢幕上
+        Rectangle source = {0, 0, (float)nx, (float)ny};
+        Rectangle dest = {0, 0, (float)screenWidth, (float)screenHeight};
+        DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
+
+        float scaleX = (float)screenWidth / nx;
+        float scaleY = (float)screenHeight / ny;
+
+        if (showGrid) {
+            Color gridColor = Fade(DARKGRAY, 0.8f); // 使用半透明的深灰色
+
+            // 畫垂直線
+            for (int i = 0; i <= nx; i++) {
+                int x = (int)(i * scaleX);
+                DrawLine(x, 0, x, screenHeight, gridColor);
+            }
+            // 畫水平線
+            for (int j = 0; j <= ny; j++) {
+                int y = (int)(j * scaleY);
+                DrawLine(0, y, screenWidth, y, gridColor);
+            }
+        }
+
+        if (showParticle) {
+            auto &particles = sim.getParticles();
+            for (auto &p : particles) {
+                float px = p.x * scaleX;
+                float py = p.y * scaleY;
+
+                DrawPixel((int)px, (int)py, RED);
+            }
+        }
+    }
+};

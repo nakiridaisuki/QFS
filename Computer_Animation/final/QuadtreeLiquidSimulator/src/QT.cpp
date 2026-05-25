@@ -1,11 +1,11 @@
-#include "MAC.h"
+#include "QT.h"
 #include <algorithm>
 #include <cstdlib>
 #include <math.h>
 #include <vector>
 
 // PUBLIC
-MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
+QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
     u.resize((nx + 1) * ny, 0.0);
     v.resize(nx * (ny + 1), 0.0);
     u_old.resize((nx + 1) * ny, 0.0);
@@ -27,7 +27,7 @@ MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
     Eigen::setNbThreads(6);
 }
 
-void MACSimulator::update(float dt) {
+void QTSimulator::update(float dt) {
     max_u = 0.0f;
     max_v = 0.0f;
 
@@ -54,7 +54,7 @@ void MACSimulator::update(float dt) {
     resampleParticles();
 }
 
-void MACSimulator::addWater(float x, float y, float radius) {
+void QTSimulator::addWater(float x, float y, float radius) {
     float r2 = radius * radius;
     for (float px = x - radius; px < x + radius; px += 0.5) {
         for (float py = y - radius; py < y + radius; py += 0.5) {
@@ -63,7 +63,7 @@ void MACSimulator::addWater(float x, float y, float radius) {
         }
     }
 }
-void MACSimulator::delWater(float x, float y, float radius) {
+void QTSimulator::delWater(float x, float y, float radius) {
     float r2 = radius * radius;
 
     auto new_end =
@@ -75,7 +75,7 @@ void MACSimulator::delWater(float x, float y, float radius) {
     markFluidCells();
 }
 
-std::vector<Line> MACSimulator::getLines() {
+std::vector<Line> QTSimulator::getLines() {
     std::vector<Line> lines;
 
     for (int i = 1; i < nx; i++) {
@@ -87,7 +87,7 @@ std::vector<Line> MACSimulator::getLines() {
     return lines;
 }
 
-void MACSimulator::setBoundaries(
+void QTSimulator::setBoundaries(
     std::vector<float> &ufield, std::vector<float> &vfield
 ) {
     for (int j = 0; j < ny; j++) {
@@ -104,7 +104,7 @@ void MACSimulator::setBoundaries(
     }
 }
 
-void MACSimulator::particleToGrid() {
+void QTSimulator::particleToGrid() {
 
     std::fill(u.begin(), u.end(), 0.f);
     std::fill(v.begin(), v.end(), 0.f);
@@ -129,7 +129,7 @@ void MACSimulator::particleToGrid() {
     }
 }
 
-void MACSimulator::velExtrapolation() {
+void QTSimulator::velExtrapolation() {
     const int ext_layers = 3;
     const int AIR = 99;
 
@@ -222,7 +222,7 @@ void MACSimulator::velExtrapolation() {
     }
 }
 
-void MACSimulator::gridToParticle() {
+void QTSimulator::gridToParticle() {
     float flipRatio = 0.95f;
 
 #pragma omp parallel for
@@ -244,7 +244,7 @@ void MACSimulator::gridToParticle() {
     }
 }
 
-void MACSimulator::advectParticles(float dt) {
+void QTSimulator::advectParticles(float dt) {
     float local_max_u = 0.0f;
     float local_max_v = 0.0f;
 
@@ -265,7 +265,7 @@ void MACSimulator::advectParticles(float dt) {
     max_v = local_max_v;
 }
 
-void MACSimulator::project() {
+void QTSimulator::project() {
     int N = nx * ny;
 
     std::fill(fluid_map.begin(), fluid_map.end(), -1);
@@ -354,7 +354,7 @@ void MACSimulator::project() {
     }
 }
 
-void MACSimulator::applyGravity(float dt) {
+void QTSimulator::applyGravity(float dt) {
     for (int j = 0; j < ny + 1; j++) {
         for (int i = 0; i < nx; i++) {
             if ((j < ny && cell_type[IX(i, j)] == 1) ||
@@ -365,7 +365,7 @@ void MACSimulator::applyGravity(float dt) {
     }
 }
 
-void MACSimulator::applySurfaceTension(float dt) {
+void QTSimulator::applySurfaceTension(float dt) {
     if (Sigma <= 0.0f)
         return;
 
@@ -446,7 +446,7 @@ void MACSimulator::applySurfaceTension(float dt) {
     }
 }
 
-void MACSimulator::markFluidCells() {
+void QTSimulator::markFluidCells() {
     std::fill(cell_type.begin(), cell_type.end(), 0);
 
 #pragma omp parallel for
@@ -460,7 +460,7 @@ void MACSimulator::markFluidCells() {
     }
 }
 
-void MACSimulator::resampleParticles() {
+void QTSimulator::resampleParticles() {
     const int target_ppc = 4;
     const int max_ppc = 8;
     const int min_ppc = 3;
@@ -519,7 +519,7 @@ void MACSimulator::resampleParticles() {
     }
 }
 
-float MACSimulator::bilerp(
+float QTSimulator::bilerp(
     const std::vector<float> &field, int w, int h, float x, float y
 ) const {
     x = std::max(0.0f, std::min((float)w - 1.001f, x));
@@ -539,7 +539,7 @@ float MACSimulator::bilerp(
            (c01 * (1 - fx) + c11 * fx) * fy;
 }
 
-void MACSimulator::bidistri(
+void QTSimulator::bidistri(
     std::vector<float> &field, int w, int h, float x, float y, float value
 ) {
     x = std::max(0.0f, std::min((float)w - 1.001f, x));

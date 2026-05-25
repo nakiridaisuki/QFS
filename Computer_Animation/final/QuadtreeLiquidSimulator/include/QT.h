@@ -5,14 +5,14 @@
 #include <Eigen/Sparse>
 #include <vector>
 
-class MACSimulator : public BaseSimulator {
+class QTSimulator : public BaseSimulator {
   private:
     int nx, ny;
     float G;     // Gravity const
     float Sigma; // surface tension
     float max_u, max_v;
 
-    // MAC grid data
+    // QT grid data
     // u for row velocity
     // v for column velocity
     // p for pressure
@@ -51,7 +51,7 @@ class MACSimulator : public BaseSimulator {
     );
 
   public:
-    MACSimulator(int width, int height);
+    QTSimulator(int width, int height);
 
     void update(float dt);                         // update every frame
     void addWater(float x, float y, float radius); // add water and dye

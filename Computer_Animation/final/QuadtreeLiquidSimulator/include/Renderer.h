@@ -1,16 +1,16 @@
-#include "MAC.h"
+#include "Base.h"
 #include <raylib.h>
 
 class FluidRenderer {
   private:
-    const MACSimulator &sim;
+    const BaseSimulator &sim;
     int screenWidth, screenHeight;
     Image image;
     Texture2D texture;
     Color *pixels;
 
   public:
-    FluidRenderer(const MACSimulator &sim, int screenW, int screenH)
+    FluidRenderer(const BaseSimulator &sim, int screenW, int screenH)
         : sim(sim), screenWidth(screenW), screenHeight(screenH) {
 
         // 建立與模擬網格大小相同的 Image

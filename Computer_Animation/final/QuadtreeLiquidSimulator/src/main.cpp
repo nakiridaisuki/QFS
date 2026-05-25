@@ -1,4 +1,5 @@
 #include "MAC.h"
+#include "QT.h"
 #include "Renderer.h"
 #include <algorithm>
 #include <cmath>
@@ -19,7 +20,8 @@ int main() {
     );
     SetTargetFPS(FPS);
 
-    MACSimulator sim(simWidth, simHeight);
+    // MACSimulator sim(simWidth, simHeight);
+    QTSimulator sim(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
 
     // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)

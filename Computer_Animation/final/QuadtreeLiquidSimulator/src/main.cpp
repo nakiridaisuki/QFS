@@ -8,7 +8,7 @@
 #include "raygui.h"
 
 int main() {
-    const int screenWidth = 1200;
+    const int screenWidth = 900;
     const int screenHeight = 900;
     const int ratio = 2;
     const int simWidth = screenWidth / ratio;

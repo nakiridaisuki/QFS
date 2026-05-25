@@ -58,16 +58,24 @@ class FluidRenderer {
         if (showGrid) {
             Color gridColor = Fade(DARKGRAY, 0.8f); // 使用半透明的深灰色
 
-            // 畫垂直線
-            for (int i = 0; i <= nx; i++) {
-                int x = (int)(i * scaleX);
-                DrawLine(x, 0, x, screenHeight, gridColor);
+            auto lines = sim.getLines();
+            for (auto line : lines) {
+                DrawLine(
+                    line.x1 * scaleX,
+                    line.y1 * scaleY,
+                    line.x2 * scaleX,
+                    line.y2 * scaleY,
+                    gridColor
+                );
             }
-            // 畫水平線
-            for (int j = 0; j <= ny; j++) {
-                int y = (int)(j * scaleY);
-                DrawLine(0, y, screenWidth, y, gridColor);
-            }
+            // for (int i = 0; i <= nx; i++) {
+            //     int x = (int)(i * scaleX);
+            //     DrawLine(x, 0, x, screenHeight, gridColor);
+            // }
+            // for (int j = 0; j <= ny; j++) {
+            //     int y = (int)(j * scaleY);
+            //     DrawLine(0, y, screenWidth, y, gridColor);
+            // }
         }
 
         if (showParticle) {

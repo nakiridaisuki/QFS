@@ -65,7 +65,7 @@ class MACSimulator : public BaseSimulator {
     const std::vector<Particle> &getParticles() const override {
         return particles;
     }
-    std::vector<Line> getLines() override;
+    std::vector<Line> getLines() const override;
 
     // get functions for main loop
     float getGravity() { return G; }

@@ -3,10 +3,33 @@
 #include "Base.h"
 #include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
+#include <limits>
 #include <vector>
+
+struct QuadtreeNode {
+    // x, y: position
+    // size: edge length of node
+    float x, y, size;
+    int depth;
+
+    bool is_leaf = true;
+    QuadtreeNode *children[4] = {nullptr};
+
+    // signed distance to surface, > 0 if inter water
+    float phi = std::numeric_limits<float>::infinity();
+    // size function
+    float S = 0.0f;
+    float pressure = 0.0f;
+    float ul = 0.0f, ur = 0.0f, vl = 0.0f, vr = 0.0f;
+};
+
+struct InterpolatedData {
+    float S, phi, pressure, ul, ur, vl, vr;
+};
 
 class QTSimulator : public BaseSimulator {
   private:
+    QuadtreeNode *root;
     int nx, ny;
     float G;     // Gravity const
     float Sigma; // surface tension
@@ -36,13 +59,41 @@ class QTSimulator : public BaseSimulator {
     void gridToParticle();
     void velExtrapolation();
     void advectParticles(float dt);
+    void buildNewTree(float dt);
     void applyGravity(float dt);
     void applySurfaceTension(float dt);
     void markFluidCells();
     void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
     void project();
 
+    // Quad Tree functions
+    void initQuadtree(QuadtreeNode *node, int max_depth);
+    void subdivideNode(QuadtreeNode *node);
+    void recursiveGetLines(QuadtreeNode *node, std::vector<Line> &lines) const;
+    void
+    recursiveUpdatePhi(QuadtreeNode *node, float cx, float cy, float radius);
+    void recursiveFree(QuadtreeNode *node);
+    void recursiveBuildTree(QuadtreeNode *node);
+    void advectQuadtreePhi(QuadtreeNode *node, float dt);
+    void computeSizingFunction(QuadtreeNode *node);
+    void propagateSizingFunction();
+
     // util functions
+    QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y);
+    void getNodesIn(
+        QuadtreeNode *node,
+        float x,
+        float y,
+        float radius,
+        std::vector<QuadtreeNode *> &nodes
+    );
+    void commitQuadtreePhi(QuadtreeNode *node);
+    void
+    collectLeafNodes(QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves);
+    float circleSDF(float cx, float cy, float radius, float x, float y) {
+        return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
+    };
+    InterpolatedData MLSinterpolate(float x, float y);
     float bilerp(
         const std::vector<float> &field, int w, int h, float x, float y
     ) const;
@@ -65,7 +116,7 @@ class QTSimulator : public BaseSimulator {
     const std::vector<Particle> &getParticles() const override {
         return particles;
     }
-    std::vector<Line> getLines() override;
+    std::vector<Line> getLines() const override;
 
     // get functions for main loop
     float getGravity() { return G; }
@@ -75,13 +126,5 @@ class QTSimulator : public BaseSimulator {
     // set functions
     void setGravity(float gravity) { G = gravity; }
     void setSigma(float sigma) { Sigma = sigma; }
-    void reset() {
-        particles.clear();
-        std::fill(u.begin(), u.end(), 0.0);
-        std::fill(v.begin(), v.end(), 0.0);
-        std::fill(u_old.begin(), u_old.end(), 0.0);
-        std::fill(v_old.begin(), v_old.end(), 0.0);
-        std::fill(p.begin(), p.end(), 0.0);
-        std::fill(cell_type.begin(), cell_type.end(), 0);
-    }
+    void reset();
 };

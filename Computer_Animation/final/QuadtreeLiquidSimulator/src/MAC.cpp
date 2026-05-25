@@ -75,7 +75,7 @@ void MACSimulator::delWater(float x, float y, float radius) {
     markFluidCells();
 }
 
-std::vector<Line> MACSimulator::getLines() {
+std::vector<Line> MACSimulator::getLines() const {
     std::vector<Line> lines;
 
     for (int i = 1; i < nx; i++) {

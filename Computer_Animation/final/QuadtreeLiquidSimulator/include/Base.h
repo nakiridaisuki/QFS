@@ -18,5 +18,5 @@ class BaseSimulator {
     virtual int getHeight() const = 0;
     virtual const std::vector<int> &getCell() const = 0;
     virtual const std::vector<Particle> &getParticles() const = 0;
-    virtual std::vector<Line> getLines() = 0;
+    virtual std::vector<Line> getLines() const = 0;
 };

@@ -79,10 +79,10 @@ std::vector<Line> MACSimulator::getLines() const {
     std::vector<Line> lines;
 
     for (int i = 1; i < nx; i++) {
-        lines.push_back({i, 0, i, ny});
+        lines.push_back({(float)i, 0, (float)i, (float)ny});
     }
     for (int i = 1; i < ny; i++) {
-        lines.push_back({0, i, nx, i});
+        lines.push_back({0, (float)i, (float)nx, (float)i});
     }
     return lines;
 }

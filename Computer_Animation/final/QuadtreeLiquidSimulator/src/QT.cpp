@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <math.h>
+#include <queue>
+#include <utility>
 #include <vector>
 
 // PUBLIC
@@ -19,6 +21,7 @@ QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
 
     cell_type.resize(nx * ny, 0);
     particles_count.resize(nx * ny, 0);
+    particle_idx.resize(nx * ny, std::vector<int>(8));
     current_count.resize(nx * ny, 0);
     fluid_map.resize(nx * ny, 0);
     triplets.reserve(nx * ny * 5);
@@ -51,6 +54,14 @@ void QTSimulator::update(float dt) {
     max_u = 0.0f;
     max_v = 0.0f;
 
+    computeSizingFunction(root);
+    propagateSizingFunction();
+    //
+    // auto new_root =
+    //     new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
+    //
+    // recursiveBuildTree(new_root, dt);
+
     particleToGrid();
 
     u_old = u;
@@ -69,11 +80,35 @@ void QTSimulator::update(float dt) {
 
     gridToParticle();
 
-    buildNewTree(dt);
-
     advectParticles(dt);
+
     markFluidCells();
     resampleParticles();
+
+    // advectQuadtreePhi(new_root, dt);
+    // redistancing(new_root);
+    //
+    // recursiveFree(root);
+    // root = new_root;
+    // updateParticleIdx();
+}
+
+void QTSimulator::updateParticleIdx() {
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            particle_idx[IX(i, j)].clear();
+        }
+    }
+    for (int i = 0; i < particles.size(); i++) {
+        auto &p = particles[i];
+        int ix = p.x;
+        int iy = p.y;
+
+        ix = std::clamp(ix, 0, nx - 1);
+        iy = std::clamp(iy, 0, ny - 1);
+
+        particle_idx[IX(ix, iy)].push_back(i);
+    }
 }
 
 void QTSimulator::addWater(float x, float y, float radius) {
@@ -86,6 +121,7 @@ void QTSimulator::addWater(float x, float y, float radius) {
     }
 
     recursiveUpdatePhi(root, x, y, radius);
+    smoothing();
 }
 void QTSimulator::delWater(float x, float y, float radius) {
     float r2 = radius * radius;
@@ -102,10 +138,10 @@ void QTSimulator::delWater(float x, float y, float radius) {
 void QTSimulator::recursiveGetLines(
     QuadtreeNode *node, std::vector<Line> &lines
 ) const {
-    int x1 = node->x - node->size / 2.f;
-    int y1 = node->y - node->size / 2.f;
-    int x2 = node->x + node->size / 2.f;
-    int y2 = node->y + node->size / 2.f;
+    float x1 = node->x - node->size / 2.f;
+    float y1 = node->y - node->size / 2.f;
+    float x2 = node->x + node->size / 2.f;
+    float y2 = node->y + node->size / 2.f;
 
     lines.push_back({x1, y1, x2, y1});
     lines.push_back({x1, y1, x1, y2});
@@ -604,6 +640,7 @@ void QTSimulator::bidistri(
     field[(i + 1) + (j + 1) * w] += c11;
 }
 
+// Quad Tree
 void QTSimulator::initQuadtree(QuadtreeNode *node, int max_depth) {
     if (node->depth >= max_depth)
         return;
@@ -614,6 +651,229 @@ void QTSimulator::initQuadtree(QuadtreeNode *node, int max_depth) {
     }
 }
 
+void QTSimulator::computeSizingFunction(QuadtreeNode *node) {
+    if (!node->is_leaf) {
+        for (int i = 0; i < 4; i++)
+            computeSizingFunction(node->children[i]);
+        return;
+    }
+
+    if (std::abs(node->phi) < node->size * 1.5f) {
+        float gamma_phi = 4.f;
+        float gamma_u = 3.f;
+
+        float geom_term = gamma_phi / (std::abs(node->phi) + 0.1f);
+
+        int i = std::clamp((int)node->x, 1, nx - 2);
+        int j = std::clamp((int)node->y, 1, ny - 2);
+
+        float du_dx = std::abs(u[IX_u(i + 1, j)] - u[IX_u(i, j)]);
+        float dv_dy = std::abs(v[IX_v(i, j + 1)] - v[IX_v(i, j)]);
+        float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
+
+        node->S = geom_term + vel_term;
+    } else {
+        node->S = 0.0f;
+    }
+}
+
+void QTSimulator::propagateSizingFunction() {
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(root, leaves);
+
+    std::vector<float> new_S(leaves.size(), 0.f);
+
+    int iterations = 5;
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int i = 0; i < leaves.size(); i++) {
+            auto node = leaves[i];
+
+            std::vector<QuadtreeNode *> neighbors;
+            getNeighbors(node, neighbors);
+
+            float total_area = 0;
+            for (auto n : neighbors) {
+
+                float area = n->size * n->size;
+                new_S[i] += std::max(n->S, node->S) * area;
+                total_area += area;
+            }
+
+            new_S[i] /= total_area;
+        }
+
+        for (int i = 0; i < leaves.size(); i++)
+            leaves[i]->S = new_S[i];
+    }
+}
+void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
+    if (node->size < 1.5f)
+        return;
+
+    float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
+    float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
+
+    float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
+    float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
+
+    auto data = MLSinterpolate(past_x, past_y);
+    float exp_phi = data.phi;
+    float exp_S = data.S;
+
+    float safe_band = node->size * 1.5f;
+
+    if (std::abs(exp_phi) < safe_band && exp_S > (1.f / node->size)) {
+        subdivideNode(node);
+
+        for (int i = 0; i < 4; i++) {
+            recursiveBuildTree(node->children[i], dt);
+        }
+    }
+}
+
+void QTSimulator::advectQuadtreePhi(QuadtreeNode *node, float dt) {
+    if (!node->is_leaf) {
+        for (int i = 0; i < 4; i++)
+            advectQuadtreePhi(node->children[i], dt);
+        return;
+    }
+
+    float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
+    float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
+
+    float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
+    float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
+
+    node->phi = MLSinterpolate(past_x, past_y).phi;
+}
+
+void QTSimulator::redistancing(QuadtreeNode *new_root) {
+    struct PhiCompare {
+        bool operator()(QuadtreeNode *a, QuadtreeNode *b) {
+            return std::abs(a->phi) > std::abs(b->phi);
+        }
+    };
+
+    std::priority_queue<QuadtreeNode *, std::vector<QuadtreeNode *>, PhiCompare>
+        pq;
+
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(new_root, leaves);
+    for (auto &leaf : leaves) {
+        if (std::abs(leaf->phi) < leaf->size * 0.75f) {
+            pq.push(leaf);
+            leaf->known = true;
+        }
+    }
+
+    while (!pq.empty()) {
+        auto curr_node = pq.top();
+        pq.pop();
+
+        curr_node->known = true;
+
+        std::vector<QuadtreeNode *> neighbors;
+        getNeighbors(curr_node, neighbors);
+
+        for (auto neighbor : neighbors) {
+            if (neighbor->known)
+                continue;
+
+            float dist = std::sqrt(
+                pow(curr_node->x - neighbor->x, 2) +
+                pow(curr_node->y - neighbor->y, 2)
+            );
+
+            float proposed_abs_phi = std::abs(curr_node->phi) + dist;
+
+            int ni = std::clamp((int)neighbor->x, 0, nx - 1);
+            int nj = std::clamp((int)neighbor->y, 0, ny - 1);
+            float proposed_phi =
+                cell_type[IX(ni, nj)] ? -proposed_abs_phi : proposed_abs_phi;
+
+            if (std::abs(proposed_phi) < std::abs(neighbor->phi)) {
+                neighbor->phi = proposed_phi;
+                pq.push(neighbor);
+            }
+        }
+    }
+}
+
+Particle QTSimulator::nearestParticle(float x, float y) {
+    int ix = std::clamp((int)x, 0, nx - 1);
+    int iy = std::clamp((int)y, 0, ny - 1);
+
+    Particle result;
+    float min_dis = 0.0f;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            int ni = ix + i, nj = iy + j;
+
+            if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
+                continue;
+
+            float dis = 999.f;
+            for (int idx : particle_idx[IX(ni, nj)]) {
+                auto &p = particles[idx];
+
+                float tmp_dis = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+                if (tmp_dis < dis) {
+                    dis = tmp_dis;
+                    result = p;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+void QTSimulator::getNeighbors(
+    QuadtreeNode *node, std::vector<QuadtreeNode *> &neighbors
+) {
+    if (!node)
+        return;
+
+    float hs = node->size / 2.f;
+    float qs = node->size / 4.f;
+
+    float eps = 0.1;
+
+    std::vector<std::pair<float, float>> sample_points = {
+        // right
+        {node->x + hs + eps, node->y + qs},
+        {node->x + hs + eps, node->y - qs},
+
+        // left
+        {node->x - hs - eps, node->y + qs},
+        {node->x - hs - eps, node->y - qs},
+
+        // down
+        {node->x + qs, node->y + hs + eps},
+        {node->x - qs, node->y + hs + eps},
+
+        // up
+        {node->x + qs, node->y - hs - eps},
+        {node->x - qs, node->y - hs - eps},
+    };
+
+    for (auto [qx, qy] : sample_points) {
+        if (qx < 0.0f || qx >= (float)nx || qy < 0.0f || qy >= (float)ny) {
+            continue;
+        }
+
+        QuadtreeNode *neighbor = getNodeAt(root, qx, qy);
+
+        if (neighbor && neighbor != node) {
+            neighbors.push_back(neighbor);
+        }
+    }
+
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(
+        std::unique(neighbors.begin(), neighbors.end()), neighbors.end()
+    );
+}
+
 void QTSimulator::subdivideNode(QuadtreeNode *node) {
     node->is_leaf = false;
 
@@ -622,6 +882,48 @@ void QTSimulator::subdivideNode(QuadtreeNode *node) {
         float x = node->x + (i & 1 ? 1.f : -1.f) * child_size / 2.f;
         float y = node->y + (i & 2 ? 1.f : -1.f) * child_size / 2.f;
         node->children[i] = new QuadtreeNode{x, y, child_size, node->depth + 1};
+    }
+}
+void QTSimulator::smoothing() {
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(root, leaves);
+
+    auto depthCmp = [](QuadtreeNode *a, QuadtreeNode *b) {
+        return a->depth < b->depth;
+    };
+    std::priority_queue<
+        QuadtreeNode *,
+        std::vector<QuadtreeNode *>,
+        decltype(depthCmp)>
+        pq(depthCmp, std::move(leaves));
+
+    while (!pq.empty()) {
+        auto node = pq.top();
+        pq.pop();
+
+        if (!node->is_leaf)
+            continue;
+
+        float step = node->size / 2.f + 0.1f;
+        int direction[5] = {1, 0, -1, 0, 1};
+        for (int i = 0; i < 4; i++) {
+            float dx = direction[i] * step;
+            float dy = direction[i + 1] * step;
+
+            float x = node->x + dx;
+            float y = node->y + dy;
+
+            if (x < 0 || x > nx || y < 0 || y > ny)
+                continue;
+
+            auto neighbor = getNodeAt(root, x, y);
+
+            if (node->depth - neighbor->depth > 1) {
+                subdivideNode(neighbor);
+                for (int c = 0; c < 4; c++)
+                    pq.push(neighbor->children[c]);
+            }
+        }
     }
 }
 
@@ -656,7 +958,8 @@ void QTSimulator::recursiveFree(QuadtreeNode *node) {
     delete node;
 }
 
-QuadtreeNode *QTSimulator::getNodeAt(QuadtreeNode *node, float x, float y) {
+QuadtreeNode *
+QTSimulator::getNodeAt(QuadtreeNode *node, float x, float y) const {
     if (node->is_leaf)
         return node;
 
@@ -696,80 +999,9 @@ void QTSimulator::getNodesIn(
     }
 }
 
-void QTSimulator::advectQuadtreePhi(QuadtreeNode *node, float dt) {
-    if (!node->is_leaf) {
-        for (int i = 0; i < 4; i++)
-            advectQuadtreePhi(node->children[i], dt);
-        return;
-    }
-
-    float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
-    float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
-
-    float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
-    float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
-
-    node->phi = MLSinterpolate(past_x, past_y).phi;
-}
-
-void QTSimulator::computeSizingFunction(QuadtreeNode *node) {
-    if (!node->is_leaf) {
-        for (int i = 0; i < 4; i++)
-            computeSizingFunction(node->children[i]);
-        return;
-    }
-
-    if (std::abs(node->phi) < node->size * 1.5f) {
-        float gamma_phi = 4.f;
-        float gamma_u = 3.f;
-
-        float geom_term = gamma_phi / (std::abs(node->phi) + 0.1f);
-
-        int i = std::clamp((int)node->x, 1, nx - 2);
-        int j = std::clamp((int)node->y, 1, ny - 2);
-
-        float du_dx = std::abs(u[IX_u(i + 1, j)] - u[IX_u(i, j)]);
-        float dv_dy = std::abs(v[IX_v(i, j + 1)] - v[IX_v(i, j)]);
-        float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
-
-        node->S = geom_term + vel_term;
-    } else {
-        node->S = 0.0f;
-    }
-}
-
-void QTSimulator::propagateSizingFunction() {
-    std::vector<QuadtreeNode *> leaves;
-    collectLeafNodes(root, leaves);
-
-    std::vector<float> new_S(leaves.size(), 0.f);
-
-    for (int iter = 0; iter < 5; iter++) {
-        for (int i = 0; i < leaves.size(); i++) {
-            auto node = leaves[i];
-            float max_S = node->S;
-
-            float step = node->size;
-            max_S =
-                std::max(max_S, getNodeAt(root, node->x + step, node->y)->S);
-            max_S =
-                std::max(max_S, getNodeAt(root, node->x - step, node->y)->S);
-            max_S =
-                std::max(max_S, getNodeAt(root, node->x, node->y + step)->S);
-            max_S =
-                std::max(max_S, getNodeAt(root, node->x, node->y - step)->S);
-
-            new_S[i] = max_S;
-        }
-
-        for (int i = 0; i < leaves.size(); i++)
-            leaves[i]->S = new_S[i];
-    }
-}
-
 void QTSimulator::collectLeafNodes(
     QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
-) {
+) const {
     if (node->is_leaf) {
         leaves.push_back(node);
         return;
@@ -780,7 +1012,12 @@ void QTSimulator::collectLeafNodes(
 }
 
 InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
-
+    struct VirtualNode {
+        float x, y;
+        float h; // 保存該點對應的網格尺寸
+        float S, phi, pressure;
+        float ul, ur, vl, vr;
+    };
     InterpolatedData result = {0.0f, 1000.f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     QuadtreeNode *target = getNodeAt(root, x, y);
@@ -791,82 +1028,149 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     std::vector<QuadtreeNode *> neighbors;
     getNodesIn(root, x, y, search_radius, neighbors);
 
+    // 1. 建立點集，並執行邊界鏡像 (Mirroring)
+    std::vector<VirtualNode> points;
+    float min_x = 0.0f;
+    float max_x = nx; // 你的模擬域邊界
+    float min_y = 0.0f;
+    float max_y = ny;
+
+    for (auto n : neighbors) {
+        // 放入原始節點
+        points.push_back(
+            {n->x,
+             n->y,
+             n->size,
+             n->S,
+             n->phi,
+             n->pressure,
+             n->ul,
+             n->ur,
+             n->vl,
+             n->vr}
+        );
+
+        // 檢查是否靠近邊界，若靠近則生成鏡像點 (Ghost Node)
+        float dist_left = n->x - min_x;
+        float dist_right = max_x - n->x;
+        float dist_bottom = n->y - min_y;
+        float dist_top = max_y - n->y;
+        float threshold = n->size * 1.5f;
+
+        bool mirror_x = false;
+        float mx = n->x;
+        if (dist_left < threshold) {
+            mirror_x = true;
+            mx = min_x - dist_left; // 向左鏡像
+        } else if (dist_right < threshold) {
+            mirror_x = true;
+            mx = max_x + dist_right; // 向右鏡像
+        }
+
+        bool mirror_y = false;
+        float my = n->y;
+        if (dist_bottom < threshold) {
+            mirror_y = true;
+            my = min_y - dist_bottom; // 向下鏡像
+        } else if (dist_top < threshold) {
+            mirror_y = true;
+            my = max_y + dist_top; // 向上鏡像
+        }
+
+        // 插入 X 方向鏡像點
+        if (mirror_x) {
+            points.push_back(
+                {mx,
+                 n->y,
+                 n->size,
+                 n->S,
+                 n->phi,
+                 n->pressure,
+                 n->ul,
+                 n->ur,
+                 n->vl,
+                 n->vr}
+            );
+        }
+        // 插入 Y 方向鏡像點
+        if (mirror_y) {
+            points.push_back(
+                {n->x,
+                 my,
+                 n->size,
+                 n->S,
+                 n->phi,
+                 n->pressure,
+                 n->ul,
+                 n->ur,
+                 n->vl,
+                 n->vr}
+            );
+        }
+        // 插入角落雙重鏡像點
+        if (mirror_x && mirror_y) {
+            points.push_back(
+                {mx,
+                 my,
+                 n->size,
+                 n->S,
+                 n->phi,
+                 n->pressure,
+                 n->ul,
+                 n->ur,
+                 n->vl,
+                 n->vr}
+            );
+        }
+    }
+
+    // 2. 進行 MLS 求解 (使用局部座標系)
     Eigen::Matrix3f A = Eigen::Matrix3f::Zero();
     Eigen::MatrixXf b(3, 7);
     b.setZero();
 
-    for (auto n : neighbors) {
-        float dx = std::abs(n->x - x);
-        float dy = std::abs(n->y - y);
+    for (const auto &p_node : points) {
+        float dx = std::abs(p_node.x - x);
+        float dy = std::abs(p_node.y - y);
+        float h = p_node.h;
 
-        float h = n->size;
-
-        float wx = std::max(1.f - (dx / h), 0.0f);
-        float wy = std::max(1.f - (dy / h), 0.0f);
+        // 引入論文中的安全常數 eps = 1e-2 防止權重降為零
+        float eps = 1e-2f;
+        float wx = std::max(1.f - (dx / h), eps);
+        float wy = std::max(1.f - (dy / h), eps);
         float weight = wx * wy;
 
-        if (weight <= 0.0f)
-            continue;
-
-        Eigen::Vector3f z_i(n->x, n->y, 1.f);
+        // 改用局部座標系 (以查詢點 x, y 作為原點)
+        float lx = p_node.x - x;
+        float ly = p_node.y - y;
+        Eigen::Vector3f z_i(lx, ly, 1.f);
 
         A += weight * (z_i * z_i.transpose());
-        b.col(0) += weight * z_i * n->S;
-        b.col(1) += weight * z_i * n->phi;
-        b.col(2) += weight * z_i * n->pressure;
-        b.col(3) += weight * z_i * n->ul;
-        b.col(4) += weight * z_i * n->ur;
-        b.col(5) += weight * z_i * n->vl;
-        b.col(6) += weight * z_i * n->vr;
+        b.col(0) += weight * z_i * p_node.S;
+        b.col(1) += weight * z_i * p_node.phi;
+        b.col(2) += weight * z_i * p_node.pressure;
+        b.col(3) += weight * z_i * p_node.ul;
+        b.col(4) += weight * z_i * p_node.ur;
+        b.col(5) += weight * z_i * p_node.vl;
+        b.col(6) += weight * z_i * p_node.vr;
     }
 
+    // 微小的脊回歸（Ridge Regression）懲罰項，確保 A 在極端情況下仍可逆
     A += Eigen::Matrix3f::Identity() * 1e-6;
 
+    // 求解係數矩陣
     Eigen::MatrixXf c = A.ldlt().solve(b);
-    Eigen::Vector3f query(x, y, 1.f);
-    Eigen::VectorXf datas = c.transpose() * query;
 
-    result.S = datas[0];
-    result.phi = datas[1];
-    result.pressure = datas[2];
-    result.ul = datas[3];
-    result.ur = datas[4];
-    result.vl = datas[5];
-    result.vr = datas[6];
+    // 由於我們使用的是局部座標，查詢點在局部座標下就是 (0, 0, 1)
+    // 擬合方程式在 (0, 0) 的值即為常數項，也就是 c 矩陣的最後一列（第 2
+    // 列，索引從 0 開始）
+    result.S = c(2, 0);
+    result.phi = c(2, 1);
+    result.pressure = c(2, 2);
+    result.ul = c(2, 3);
+    result.ur = c(2, 4);
+    result.vl = c(2, 5);
+    result.vr = c(2, 6);
 
     return result;
-}
-
-void QTSimulator::recursiveBuildTree(QuadtreeNode *node) {
-    if (node->size < 1.5f)
-        return;
-
-    auto data = MLSinterpolate(node->x, node->y);
-    float phi_p = data.phi;
-    float S_p = data.S;
-
-    float max_vel = std::max(max_u, max_v);
-    float safe_band = node->size * 1.5f + max_vel * 0.016f;
-
-    if (std::abs(phi_p) < safe_band && S_p > (1.f / node->size)) {
-        subdivideNode(node);
-
-        for (int i = 0; i < 4; i++) {
-            recursiveBuildTree(node->children[i]);
-        }
-    }
-}
-void QTSimulator::buildNewTree(float dt) {
-    auto new_root =
-        new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
-
-    computeSizingFunction(root);
-    propagateSizingFunction();
-
-    recursiveBuildTree(new_root);
-
-    advectQuadtreePhi(new_root, dt);
-
-    recursiveFree(root);
-    root = new_root;
 }

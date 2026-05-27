@@ -1,5 +1,10 @@
 #include "Base.h"
+#include "QT.h"
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include <raylib.h>
+#include <typeinfo>
 
 class FluidRenderer {
   private:
@@ -30,7 +35,9 @@ class FluidRenderer {
         delete[] pixels;
     }
 
-    void draw(bool showGrid = false, bool showParticle = false) {
+    void draw(
+        bool showGrid = false, bool showParticle = false, bool showPhi = false
+    ) {
         const auto &celltype = sim.getCell();
         int nx = sim.getWidth();
         int ny = sim.getHeight();
@@ -68,14 +75,6 @@ class FluidRenderer {
                     gridColor
                 );
             }
-            // for (int i = 0; i <= nx; i++) {
-            //     int x = (int)(i * scaleX);
-            //     DrawLine(x, 0, x, screenHeight, gridColor);
-            // }
-            // for (int j = 0; j <= ny; j++) {
-            //     int y = (int)(j * scaleY);
-            //     DrawLine(0, y, screenWidth, y, gridColor);
-            // }
         }
 
         if (showParticle) {
@@ -85,6 +84,34 @@ class FluidRenderer {
                 float py = p.y * scaleY;
 
                 DrawPixel((int)px, (int)py, RED);
+            }
+        }
+
+        if (showPhi) {
+            try {
+                const QTSimulator &qt_sim =
+                    dynamic_cast<const QTSimulator &>(sim);
+                for (int j = 0; j < ny; j++) {
+                    for (int i = 0; i < nx; i++) {
+                        int idx = i + j * nx;
+                        float phi =
+                            qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
+                                ->S;
+
+                        unsigned char color =
+                            std::clamp(int(20.0 * std::abs(phi)), 0, 255);
+                        pixels[idx] = Color{color, 50, 0, 50};
+                    }
+                }
+                UpdateTexture(texture, pixels);
+
+                Rectangle source = {0, 0, (float)nx, (float)ny};
+                Rectangle dest = {
+                    0, 0, (float)screenWidth, (float)screenHeight
+                };
+                DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
+            } catch (const std::bad_cast &e) {
+                std::cout << "Cast failed: " << e.what() << std::endl;
             }
         }
     }

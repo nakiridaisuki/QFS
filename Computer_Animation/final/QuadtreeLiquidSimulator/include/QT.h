@@ -13,6 +13,7 @@ struct QuadtreeNode {
     int depth;
 
     bool is_leaf = true;
+    bool known = false;
     QuadtreeNode *children[4] = {nullptr};
 
     // signed distance to surface, > 0 if inter water
@@ -44,6 +45,7 @@ class QTSimulator : public BaseSimulator {
     std::vector<float> weight_u, weight_v;
     std::vector<int> cell_type, particles_count, current_count, fluid_map;
     std::vector<Eigen::Triplet<float>> triplets;
+    std::vector<std::vector<int>> particle_idx;
     Eigen::ConjugateGradient<
         Eigen::SparseMatrix<float>,
         Eigen::Lower | Eigen::Upper>
@@ -65,6 +67,7 @@ class QTSimulator : public BaseSimulator {
     void markFluidCells();
     void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
     void project();
+    void updateParticleIdx();
 
     // Quad Tree functions
     void initQuadtree(QuadtreeNode *node, int max_depth);
@@ -73,13 +76,15 @@ class QTSimulator : public BaseSimulator {
     void
     recursiveUpdatePhi(QuadtreeNode *node, float cx, float cy, float radius);
     void recursiveFree(QuadtreeNode *node);
-    void recursiveBuildTree(QuadtreeNode *node);
+    void recursiveBuildTree(QuadtreeNode *node, float dt);
     void advectQuadtreePhi(QuadtreeNode *node, float dt);
     void computeSizingFunction(QuadtreeNode *node);
     void propagateSizingFunction();
+    void redistancing(QuadtreeNode *root);
+    void smoothing();
 
     // util functions
-    QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y);
+    QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y) const;
     void getNodesIn(
         QuadtreeNode *node,
         float x,
@@ -87,9 +92,13 @@ class QTSimulator : public BaseSimulator {
         float radius,
         std::vector<QuadtreeNode *> &nodes
     );
-    void commitQuadtreePhi(QuadtreeNode *node);
     void
-    collectLeafNodes(QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves);
+    getNeighbors(QuadtreeNode *node, std::vector<QuadtreeNode *> &neighbors);
+    Particle nearestParticle(float x, float y);
+    void commitQuadtreePhi(QuadtreeNode *node);
+    void collectLeafNodes(
+        QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
+    ) const;
     float circleSDF(float cx, float cy, float radius, float x, float y) {
         return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
     };
@@ -113,6 +122,9 @@ class QTSimulator : public BaseSimulator {
     int getWidth() const override { return nx; }
     int getHeight() const override { return ny; }
     const std::vector<int> &getCell() const override { return cell_type; }
+    const QuadtreeNode *getNodeAt(float x, float y) const {
+        return getNodeAt(root, x, y);
+    };
     const std::vector<Particle> &getParticles() const override {
         return particles;
     }

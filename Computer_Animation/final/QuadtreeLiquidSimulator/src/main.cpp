@@ -8,11 +8,10 @@
 #include "raygui.h"
 
 int main() {
-    const int screenWidth = 900;
-    const int screenHeight = 900;
-    const int ratio = 2;
-    const int simWidth = screenWidth / ratio;
-    const int simHeight = screenHeight / ratio;
+    const int screenWidth = 1000;
+    const int screenHeight = 1000;
+    const int simWidth = 128;
+    const int simHeight = simWidth;
     const int FPS = 60;
 
     InitWindow(
@@ -38,7 +37,8 @@ int main() {
     float speed = 1.f;
     int frame_cnt = 0;
     bool showGrid = true;
-    bool showParticle = true;
+    bool showParticle = false;
+    bool showPhi = false;
     // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
     Rectangle uiPanelRec = {10, 60, 260, 150};
 
@@ -86,7 +86,7 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        renderer.draw(showGrid, showParticle);
+        renderer.draw(showGrid, showParticle, showPhi);
 
         // 畫一點基本的文字
         DrawText(
@@ -151,10 +151,9 @@ int main() {
             sim.setGravity(gravity);
             sim.setSigma(tension);
 
-            GuiCheckBox(
-                Rectangle{100, 170, 20, 20}, "Show Particles", &showParticle
-            );
-            GuiCheckBox(Rectangle{100, 190, 20, 20}, "Show Grid", &showGrid);
+            GuiCheckBox(Rectangle{10, 170, 20, 20}, "Particles", &showParticle);
+            GuiCheckBox(Rectangle{10, 190, 20, 20}, "Grid", &showGrid);
+            GuiCheckBox(Rectangle{110, 170, 20, 20}, "Phi", &showPhi);
 
             // 把 Reset 按鈕稍微往下挪
             if (GuiButton(Rectangle{100, 215, 120, 30}, "Reset Fluid")) {

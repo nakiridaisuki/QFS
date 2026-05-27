@@ -96,7 +96,7 @@ class FluidRenderer {
                         int idx = i + j * nx;
                         float phi =
                             qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
-                                ->S;
+                                ->phi;
 
                         unsigned char color =
                             std::clamp(int(20.0 * std::abs(phi)), 0, 255);

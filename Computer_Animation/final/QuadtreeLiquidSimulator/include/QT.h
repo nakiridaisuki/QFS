@@ -19,13 +19,56 @@ struct QuadtreeNode {
     // signed distance to surface, > 0 if inter water
     float phi = std::numeric_limits<float>::infinity();
     // size function
-    float S = 0.0f;
+    float S = 0.0f, S_new = 0.0f;
     float pressure = 0.0f;
     float ul = 0.0f, ur = 0.0f, vl = 0.0f, vr = 0.0f;
 };
 
 struct InterpolatedData {
     float S, phi, pressure, ul, ur, vl, vr;
+
+    InterpolatedData() = default;
+    InterpolatedData(
+        float s, float p, float pr, float u_l, float u_r, float v_l, float v_r
+    )
+        : S(s), phi(p), pressure(pr), ul(u_l), ur(u_r), vl(v_l), vr(v_r) {}
+
+    InterpolatedData(const QuadtreeNode *node) {
+        if (node) {
+            S = node->S;
+            phi = node->phi;
+            pressure = node->pressure;
+            ul = node->ul;
+            ur = node->ur;
+            vl = node->vl;
+            vr = node->vr;
+        } else {
+            S = phi = pressure = ul = ur = vl = vr = 0.0f;
+        }
+    }
+
+    InterpolatedData operator+(const InterpolatedData &x) const {
+        return InterpolatedData{
+            S + x.S,
+            phi + x.phi,
+            pressure + x.pressure,
+            ul + x.ul,
+            ur + x.ur,
+            vl + x.vl,
+            vr + x.vr
+        };
+    }
+
+    InterpolatedData operator*(const float x) const {
+        return InterpolatedData{
+            S * x, phi * x, pressure * x, ul * x, ur * x, vl * x, vr * x
+        };
+    }
+};
+
+struct NeighborData {
+    InterpolatedData datas;
+    float distance;
 };
 
 class QTSimulator : public BaseSimulator {
@@ -77,11 +120,11 @@ class QTSimulator : public BaseSimulator {
     recursiveUpdatePhi(QuadtreeNode *node, float cx, float cy, float radius);
     void recursiveFree(QuadtreeNode *node);
     void recursiveBuildTree(QuadtreeNode *node, float dt);
-    void advectQuadtreePhi(QuadtreeNode *node, float dt);
-    void computeSizingFunction(QuadtreeNode *node);
+    void advectQuadtreeDatas(QuadtreeNode *node, float dt);
+    void computeSizingFunction(QuadtreeNode *node, float dt);
     void propagateSizingFunction();
     void redistancing(QuadtreeNode *root);
-    void smoothing();
+    void smoothing(QuadtreeNode *new_root);
 
     // util functions
     QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y) const;
@@ -92,10 +135,16 @@ class QTSimulator : public BaseSimulator {
         float radius,
         std::vector<QuadtreeNode *> &nodes
     );
-    void
-    getNeighbors(QuadtreeNode *node, std::vector<QuadtreeNode *> &neighbors);
-    Particle nearestParticle(float x, float y);
-    void commitQuadtreePhi(QuadtreeNode *node);
+    void getNeighbors(
+        QuadtreeNode *node,
+        std::vector<std::pair<int, QuadtreeNode *>> &neighbors
+    );
+    NeighborData getNeighborData(QuadtreeNode *node, int direction);
+    Particle nearestParticle(float x, float y, float radius);
+    void getParticlesIn(
+        float x, float y, float radius, std::vector<Particle> &particles
+    );
+    void commitQuadtreeS(QuadtreeNode *node);
     void collectLeafNodes(
         QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
     ) const;

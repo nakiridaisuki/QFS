@@ -17,7 +17,7 @@ struct QuadtreeNode {
     QuadtreeNode *children[4] = {nullptr};
 
     // signed distance to surface, > 0 if inter water
-    float phi = std::numeric_limits<float>::infinity();
+    float phi = std::numeric_limits<float>::infinity(), phi_new;
     // size function
     float S = 0.0f, S_new = 0.0f;
     float pressure = 0.0f;
@@ -141,10 +141,8 @@ class QTSimulator : public BaseSimulator {
     );
     NeighborData getNeighborData(QuadtreeNode *node, int direction);
     Particle nearestParticle(float x, float y, float radius);
-    void getParticlesIn(
-        float x, float y, float radius, std::vector<Particle> &particles
-    );
     void commitQuadtreeS(QuadtreeNode *node);
+    void commitQuadtreePhi(QuadtreeNode *node);
     void collectLeafNodes(
         QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
     ) const;

@@ -1,5 +1,4 @@
 #include "QT.h"
-#include "utils.h"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cassert>
@@ -741,8 +740,8 @@ void QTSimulator::computeSizingFunction(QuadtreeNode *node, float dt) {
 
         float S = geom_term + vel_term;
 
-        float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
-        float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
+        float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
+        float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
 
         float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
         float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
@@ -763,6 +762,15 @@ void QTSimulator::commitQuadtreeS(QuadtreeNode *node) {
         return;
     }
     node->S = node->S_new;
+}
+
+void QTSimulator::commitQuadtreePhi(QuadtreeNode *node) {
+    if (!node->is_leaf) {
+        for (int i = 0; i < 4; i++)
+            commitQuadtreePhi(node->children[i]);
+        return;
+    }
+    node->phi = node->phi_new;
 }
 
 void QTSimulator::propagateSizingFunction() {
@@ -799,8 +807,8 @@ void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
     if (node->size < 1.5f)
         return;
 
-    float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
-    float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
+    float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
+    float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
 
     float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
     float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
@@ -810,10 +818,6 @@ void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
 
     float exp_phi = advected_data.phi;
     float exp_S = data.S;
-
-    if (std::isnan(exp_phi) || std::isinf(exp_phi)) {
-        std::cout << "Can't subdivide since wired phi " << exp_phi << std::endl;
-    }
 
     if (std::abs(exp_phi) < node->size && exp_S > (1.f / node->size)) {
         subdivideNode(node);
@@ -831,8 +835,8 @@ void QTSimulator::advectQuadtreeDatas(QuadtreeNode *node, float dt) {
         return;
     }
 
-    float u_val = bilerp(u, nx + 1, ny, node->x, node->y - 0.5f);
-    float v_val = bilerp(v, nx, ny + 1, node->x - 0.5f, node->y);
+    float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
+    float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
 
     float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
     float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
@@ -845,7 +849,7 @@ void QTSimulator::advectQuadtreeDatas(QuadtreeNode *node, float dt) {
 void QTSimulator::redistancing(QuadtreeNode *new_root) {
     struct PhiCompare {
         bool operator()(QuadtreeNode *a, QuadtreeNode *b) {
-            return std::abs(a->phi) > std::abs(b->phi);
+            return std::abs(a->phi_new) > std::abs(b->phi_new);
         }
     };
 
@@ -855,48 +859,12 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
     std::vector<QuadtreeNode *> leaves;
     collectLeafNodes(new_root, leaves);
     for (auto leaf : leaves) {
-
-        // if (std::abs(leaf->phi) < leaf->size * 2.f) {
-        //
-        //     if (leaf->phi >= 0.0f) {
-        //         auto nearest_p =
-        //             nearestParticle(leaf->x, leaf->y, leaf->size /
-        //             2);
-        //
-        //         if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-        //             leaf->phi =
-        //             std::numeric_limits<float>::infinity(); continue;
-        //         }
-        //
-        //         float dist = std::sqrt(
-        //             (leaf->x - nearest_p.x) * (leaf->x - nearest_p.x)
-        //             + (leaf->y - nearest_p.y) * (leaf->y -
-        //             nearest_p.y)
-        //         );
-        //         leaf->phi = dist;
-        //     } else {
-        //         std::vector<Particle> around_p;
-        //         getParticlesIn(leaf->x, leaf->y, leaf->size * 2.f,
-        //         around_p);
-        //
-        //         float dist =
-        //             Utils::getMinRadiusFromHull(leaf->x, leaf->y,
-        //             around_p);
-        //
-        //         if (dist > leaf->size * 1.414) {
-        //             leaf->phi =
-        //             std::numeric_limits<float>::infinity(); continue;
-        //         }
-        //
-        //         leaf->phi = -dist;
-        //     }
-        //     pq.push(leaf);
-        if (leaf->phi >= 0.0f && leaf->phi < leaf->size * 2.f) {
+        if (0.0f <= leaf->phi && leaf->phi < leaf->size * 1.5f) {
 
             auto nearest_p = nearestParticle(leaf->x, leaf->y, leaf->size / 2);
 
             if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-                leaf->phi = std::numeric_limits<float>::infinity();
+                leaf->phi_new = std::numeric_limits<float>::infinity();
                 continue;
             }
 
@@ -904,14 +872,15 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
                 (leaf->x - nearest_p.x) * (leaf->x - nearest_p.x) +
                 (leaf->y - nearest_p.y) * (leaf->y - nearest_p.y)
             );
-            leaf->phi = dist;
+            leaf->phi_new = dist;
+            pq.push(leaf);
         } else {
-            leaf->phi = std::numeric_limits<float>::infinity();
+            leaf->phi_new = std::numeric_limits<float>::infinity();
         }
     }
 
     if (pq.empty()) {
-        std::cout << "Can't find surface node" << std::endl;
+        return;
     }
 
     while (!pq.empty()) {
@@ -935,14 +904,15 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
 
             dist = cell_type[IX(ni, nj)] ? -dist : dist;
 
-            float proposed_phi = curr_node->phi + dist;
+            float proposed_phi_new = curr_node->phi_new + dist;
 
-            if (std::abs(proposed_phi) < std::abs(neighbor->phi)) {
-                neighbor->phi = proposed_phi;
+            if (std::abs(proposed_phi_new) < std::abs(neighbor->phi_new)) {
+                neighbor->phi_new = proposed_phi_new;
                 pq.push(neighbor);
             }
         }
     }
+    commitQuadtreePhi(new_root);
 }
 
 Particle QTSimulator::nearestParticle(float x, float y, float radius) {
@@ -970,47 +940,6 @@ Particle QTSimulator::nearestParticle(float x, float y, float radius) {
         }
     }
     return result;
-}
-void QTSimulator::getParticlesIn(
-    float x, float y, float radius, std::vector<Particle> &result
-) {
-    int l = std::floor(x - radius);
-    int r = std::floor(x + radius);
-    int u = std::floor(y - radius);
-    int d = std::floor(y + radius);
-
-    for (int i = l; i < r; i++) {
-        for (int j = u; j < d; j++) {
-            int ri = i, rj = j;
-            if (i < 0)
-                ri = -1 - ri;
-            if (j < 0)
-                rj = -1 - rj;
-            if (i >= nx)
-                ri -= 2 * (ri - nx) + 1;
-            if (j >= ny)
-                rj -= 2 * (rj - ny) + 1;
-            int idx = IX(ri, rj);
-
-            for (int pid : particle_idx[idx]) {
-                auto p = particles[pid];
-                if (i < 0)
-                    p.x *= -1;
-                if (j < 0)
-                    p.y *= -1;
-                if (i >= nx)
-                    p.x -= 2.f * (p.x - nx);
-                if (j >= ny)
-                    p.y -= 2.f * (p.y - ny);
-
-                float dx = p.x - x;
-                float dy = p.y - y;
-                if (dx * dx + dy * dy <= radius * radius) {
-                    result.push_back(p);
-                }
-            }
-        }
-    }
 }
 
 void QTSimulator::getNeighbors(
@@ -1218,7 +1147,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     if (!target)
         return result;
 
-    float search_radius = target->size * 1.5f;
+    float search_radius = target->size * 3.f;
     std::vector<QuadtreeNode *> neighbors;
     getNodesIn(root, x, y, search_radius, neighbors);
 

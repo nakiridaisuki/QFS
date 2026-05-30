@@ -10,7 +10,7 @@
 int main() {
     const int screenWidth = 1000;
     const int screenHeight = 1000;
-    const int simWidth = 128;
+    const int simWidth = 64;
     const int simHeight = simWidth;
     const int FPS = 60;
 

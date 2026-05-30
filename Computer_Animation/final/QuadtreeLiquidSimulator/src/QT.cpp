@@ -5,27 +5,19 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <math.h>
 #include <queue>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 // PUBLIC
 QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
-    u.resize((nx + 1) * ny, 0.0);
-    v.resize(nx * (ny + 1), 0.0);
-    u_old.resize((nx + 1) * ny, 0.0);
-    v_old.resize(nx * (ny + 1), 0.0);
-    weight_u.resize((nx + 1) * ny, 0.0);
-    weight_v.resize(nx * (ny + 1), 0.0);
-
     cell_type.resize(nx * ny, 0);
     particles_count.resize(nx * ny, 0);
-    particle_idx.resize(nx * ny, std::vector<int>(8));
     current_count.resize(nx * ny, 0);
     fluid_map.resize(nx * ny, 0);
-    triplets.reserve(nx * ny * 5);
-    p.resize(nx * ny, 0.0);
     G = 150.f;
     Sigma = 0.0f;
 
@@ -38,22 +30,21 @@ QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
 }
 void QTSimulator::reset() {
     particles.clear();
-    std::fill(u.begin(), u.end(), 0.0);
-    std::fill(v.begin(), v.end(), 0.0);
-    std::fill(u_old.begin(), u_old.end(), 0.0);
-    std::fill(v_old.begin(), v_old.end(), 0.0);
-    std::fill(p.begin(), p.end(), 0.0);
     std::fill(cell_type.begin(), cell_type.end(), 0);
 
     recursiveFree(root);
     root = new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
     initQuadtree(root, 3);
+    findAllEdges(root);
+    QTu = QTu_new;
+    QTv = QTv_new;
 }
 
 void QTSimulator::update(float dt) {
     max_u = 0.0f;
     max_v = 0.0f;
 
+    // Generate new Quad Tree
     computeSizingFunction(root, dt);
     commitQuadtreeS(root);
     propagateSizingFunction();
@@ -63,54 +54,42 @@ void QTSimulator::update(float dt) {
     recursiveBuildTree(new_root, dt);
     smoothing(new_root);
 
+    cacheNeighbors(new_root);
+
+    findAllEdges(new_root);
+
     advectQuadtreeDatas(new_root, dt);
     recursiveFree(root);
     root = new_root;
 
-    particleToGrid();
+    QTu = QTu_new;
+    QTv = QTv_new;
 
-    u_old = u;
-    v_old = v;
+    QTapplyGravity(dt);
+    QTproject();
 
-    setBoundaries(u_old, v_old);
-
-    applyGravity(dt);
-    applySurfaceTension(dt);
-
-    setBoundaries(u, v);
-    project();
-    setBoundaries(u, v);
-
-    velExtrapolation();
-
-    gridToParticle();
-
-    advectParticles(dt);
-
-    markFluidCells();
-    resampleParticles();
-
-    updateParticleIdx();
+    // // Redistance
+    // updateParticleIdx();
     redistancing(new_root);
 }
 
-void QTSimulator::updateParticleIdx() {
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            particle_idx[IX(i, j)].clear();
-        }
-    }
-    for (int i = 0; i < particles.size(); i++) {
-        auto &p = particles[i];
-        int ix = p.x;
-        int iy = p.y;
-
-        ix = std::clamp(ix, 0, nx - 1);
-        iy = std::clamp(iy, 0, ny - 1);
-
-        particle_idx[IX(ix, iy)].push_back(i);
-    }
-}
+// void QTSimulator::updateParticleIdx() {
+//     for (int j = 0; j < ny; j++) {
+//         for (int i = 0; i < nx; i++) {
+//             particle_idx[IX(i, j)].clear();
+//         }
+//     }
+//     for (int i = 0; i < particles.size(); i++) {
+//         auto &p = particles[i];
+//         int ix = p.x;
+//         int iy = p.y;
+//
+//         ix = std::clamp(ix, 0, nx - 1);
+//         iy = std::clamp(iy, 0, ny - 1);
+//
+//         particle_idx[IX(ix, iy)].push_back(i);
+//     }
+// }
 
 void QTSimulator::addWater(float x, float y, float radius) {
     float r2 = radius * radius;
@@ -123,17 +102,18 @@ void QTSimulator::addWater(float x, float y, float radius) {
 
     recursiveUpdatePhi(root, x, y, radius);
     smoothing(root);
+    cacheNeighbors(root);
 }
 void QTSimulator::delWater(float x, float y, float radius) {
-    float r2 = radius * radius;
-
-    auto new_end =
-        std::remove_if(particles.begin(), particles.end(), [&](auto &p) {
-            return ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y)) < r2;
-        });
-
-    particles.erase(new_end, particles.end());
-    markFluidCells();
+    // float r2 = radius * radius;
+    //
+    // auto new_end =
+    //     std::remove_if(particles.begin(), particles.end(), [&](auto &p) {
+    //         return ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y)) < r2;
+    //     });
+    //
+    // particles.erase(new_end, particles.end());
+    // markFluidCells();
 }
 
 void QTSimulator::recursiveGetLines(
@@ -164,193 +144,27 @@ std::vector<Line> QTSimulator::getLines() const {
     return lines;
 }
 
-void QTSimulator::setBoundaries(
-    std::vector<float> &ufield, std::vector<float> &vfield
-) {
-    for (int j = 0; j < ny; j++) {
-        // if (ufield[IX_u(0, j)] < 0.f)
-        ufield[IX_u(0, j)] = 0.0;
-        // if (ufield[IX_u(nx, j)] > 0.f)
-        ufield[IX_u(nx, j)] = 0.0;
+float compute_Wk(QuadtreeEdge &face) {
+    float total = 0, liquid = 0;
+    for (int i = 0; i < face.adj_cells.size(); i++) {
+        total += face.grad_coeff[i] * face.adj_cells[i]->phi;
+        if (face.adj_cells[i]->phi <= 0.f)
+            liquid += face.grad_coeff[i] * face.adj_cells[i]->phi;
     }
-    for (int i = 0; i < nx; i++) {
-        if (vfield[IX_v(i, 0)] < 0.f)
-            vfield[IX_v(i, 0)] = 0.0;
-        if (vfield[IX_v(i, ny)] > 0.f)
-            vfield[IX_v(i, ny)] = 0.0;
-    }
+    if (std::abs(liquid) < 1e-6f)
+        return 1.f;
+    return total / liquid;
 }
+void QTSimulator::QTproject() {
 
-void QTSimulator::particleToGrid() {
-
-    std::fill(u.begin(), u.end(), 0.f);
-    std::fill(v.begin(), v.end(), 0.f);
-    std::fill(weight_u.begin(), weight_u.end(), 0.f);
-    std::fill(weight_v.begin(), weight_v.end(), 0.f);
-
-    for (const auto &p : particles) {
-        bidistri(u, nx + 1, ny, p.x, p.y - 0.5, p.u);
-        bidistri(weight_u, nx + 1, ny, p.x, p.y - 0.5, 1);
-
-        bidistri(v, nx, ny + 1, p.x - 0.5, p.y, p.v);
-        bidistri(weight_v, nx, ny + 1, p.x - 0.5, p.y, 1);
-    }
-
-    for (int i = 0; i < u.size(); i++) {
-        if (weight_u[i] > 1e-6)
-            u[i] /= weight_u[i];
-    }
-    for (int i = 0; i < v.size(); i++) {
-        if (weight_v[i] > 1e-6)
-            v[i] /= weight_v[i];
-    }
-}
-
-void QTSimulator::velExtrapolation() {
-    const int ext_layers = 3;
-    const int AIR = 99;
-
-    static std::vector<int> valid_u, valid_v;
-    valid_u.assign((nx + 1) * ny, AIR);
-    valid_v.assign(nx * (ny + 1), AIR);
-
-#pragma omp parallel for
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i <= nx; i++) {
-            bool fluid_left = (i > 0) && (cell_type[IX(i - 1, j)] == 1);
-            bool fluid_right = (i < nx) && (cell_type[IX(i, j)] == 1);
-            if (fluid_left || fluid_right) {
-                valid_u[IX_u(i, j)] = 1;
-            }
-        }
-    }
-
-#pragma omp parallel for
-    for (int j = 0; j <= ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            bool fluid_bottom = (j > 0) && (cell_type[IX(i, j - 1)] == 1);
-            bool fluid_top = (j < ny) && (cell_type[IX(i, j)] == 1);
-            if (fluid_bottom || fluid_top) {
-                valid_v[IX_v(i, j)] = 1;
-            }
-        }
-    }
-
-    for (int iter = 1; iter <= ext_layers; iter++) {
-        for (int j = 0; j < ny; j++) {
-            for (int i = 0; i <= nx; i++) {
-                if (valid_u[IX_u(i, j)] == AIR) {
-                    float sum = 0;
-                    int count = 0;
-                    if (i > 0 && valid_u[IX_u(i - 1, j)] <= iter) {
-                        sum += u[IX_u(i - 1, j)];
-                        count++;
-                    }
-                    if (i < nx && valid_u[IX_u(i + 1, j)] <= iter) {
-                        sum += u[IX_u(i + 1, j)];
-                        count++;
-                    }
-                    if (j > 0 && valid_u[IX_u(i, j - 1)] <= iter) {
-                        sum += u[IX_u(i, j - 1)];
-                        count++;
-                    }
-                    if (j < ny - 1 && valid_u[IX_u(i, j + 1)] <= iter) {
-                        sum += u[IX_u(i, j + 1)];
-                        count++;
-                    }
-
-                    if (count > 0) {
-                        u[IX_u(i, j)] = sum / (float)count;
-                        valid_u[IX_u(i, j)] = iter + 1;
-                    }
-                }
-            }
-        }
-
-        for (int j = 0; j <= ny; j++) {
-            for (int i = 0; i < nx; i++) {
-                if (valid_v[IX_v(i, j)] == AIR) {
-                    float sum = 0;
-                    int count = 0;
-                    if (i > 0 && valid_v[IX_v(i - 1, j)] <= iter) {
-                        sum += v[IX_v(i - 1, j)];
-                        count++;
-                    }
-                    if (i < nx - 1 && valid_v[IX_v(i + 1, j)] <= iter) {
-                        sum += v[IX_v(i + 1, j)];
-                        count++;
-                    }
-                    if (j > 0 && valid_v[IX_v(i, j - 1)] <= iter) {
-                        sum += v[IX_v(i, j - 1)];
-                        count++;
-                    }
-                    if (j < ny && valid_v[IX_v(i, j + 1)] <= iter) {
-                        sum += v[IX_v(i, j + 1)];
-                        count++;
-                    }
-
-                    if (count > 0) {
-                        v[IX_v(i, j)] = sum / (float)count;
-                        valid_v[IX_v(i, j)] = iter + 1;
-                    }
-                }
-            }
-        }
-    }
-}
-
-void QTSimulator::gridToParticle() {
-    float flipRatio = 0.95f;
-
-#pragma omp parallel for
-    for (auto &p : particles) {
-        float u_new_grid = bilerp(u, nx + 1, ny, p.x, p.y - 0.5);
-        float v_new_grid = bilerp(v, nx, ny + 1, p.x - 0.5, p.y);
-
-        float u_old_grid = bilerp(u_old, nx + 1, ny, p.x, p.y - 0.5);
-        float v_old_grid = bilerp(v_old, nx, ny + 1, p.x - 0.5, p.y);
-
-        float u_pic = u_new_grid;
-        float v_pic = v_new_grid;
-
-        float u_flip = p.u + (u_new_grid - u_old_grid);
-        float v_flip = p.v + (v_new_grid - v_old_grid);
-
-        p.u = flipRatio * u_flip + (1.f - flipRatio) * u_pic;
-        p.v = flipRatio * v_flip + (1.f - flipRatio) * v_pic;
-    }
-}
-
-void QTSimulator::advectParticles(float dt) {
-    float local_max_u = 0.0f;
-    float local_max_v = 0.0f;
-
-#pragma omp parallel for reduction(max : local_max_u)                          \
-    reduction(max : local_max_v)
-    for (auto &p : particles) {
-        p.x += p.u * dt;
-        p.y += p.v * dt;
-
-        p.x = std::max(0.001f, std::min(float(nx) - 0.001f, p.x));
-        p.y = std::max(0.001f, std::min(float(ny) - 0.001f, p.y));
-
-        local_max_u = std::max(std::abs(p.u), max_u);
-        local_max_v = std::max(std::abs(p.v), max_v);
-    }
-
-    max_u = local_max_u;
-    max_v = local_max_v;
-}
-
-void QTSimulator::project() {
-    int N = nx * ny;
-
-    std::fill(fluid_map.begin(), fluid_map.end(), -1);
+    std::map<QuadtreeNode *, int> QTfluid_map;
     int fluid_count = 0;
-    for (int i = 0; i < N; i++) {
-        if (cell_type[i] == 1) {
-            fluid_map[i] = fluid_count++;
-        }
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(root, leaves);
+
+    for (auto leaf : leaves) {
+        if (leaf->phi <= 0.0)
+            QTfluid_map[leaf] = fluid_count++;
     }
 
     if (fluid_count == 0)
@@ -358,241 +172,87 @@ void QTSimulator::project() {
 
     Eigen::VectorXf div(fluid_count);
     div.setZero();
-    triplets.clear();
+    std::vector<Eigen::Triplet<float>> QTtriplets;
 
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            int idx = IX(i, j);
+    auto addFace = [&](QuadtreeEdge &face) {
+        float u_star = face.val;
+        float VA = face.length * (1.f - face.solid_fraction);
 
-            if (cell_type[idx] == 0) {
+        bool has_fluid = false;
+        for (auto cell : face.adj_cells)
+            has_fluid |= QTfluid_map.count(cell);
+        if (!has_fluid)
+            return;
+
+        float W_k = compute_Wk(face);
+        float W_prime = std::max(W_k, 0.01f);
+        float face_weight = VA * W_prime;
+
+        for (int i = 0; i < face.adj_cells.size(); i++) {
+            auto cell_i = face.adj_cells[i];
+            if (!QTfluid_map.count(cell_i))
                 continue;
-            }
+            int row = QTfluid_map[cell_i];
 
-            int row = fluid_map[idx];
-            float d = u[IX_u(i + 1, j)] -
-                      u[IX_u(i, j)] +
-                      v[IX_v(i, j + 1)] -
-                      v[IX_v(i, j)];
-            div[row] = -d;
+            div[row] += VA * u_star * face.grad_coeff[i];
 
-            int count = 0;
-            if (i > 0) {
-                if (cell_type[IX(i - 1, j)] != 0) {
-                    triplets.push_back({row, fluid_map[IX(i - 1, j)], -1.0f});
-                }
-                count++;
-            }
-            if (i < nx - 1) {
-                if (cell_type[IX(i + 1, j)] != 0) {
-                    triplets.push_back({row, fluid_map[IX(i + 1, j)], -1.0f});
-                }
-                count++;
-            }
-            if (j > 0) {
-                if (cell_type[IX(i, j - 1)] != 0) {
-                    triplets.push_back({row, fluid_map[IX(i, j - 1)], -1.0f});
-                }
-                count++;
-            }
-            if (j < ny - 1) {
-                if (cell_type[IX(i, j + 1)] != 0) {
-                    triplets.push_back({row, fluid_map[IX(i, j + 1)], -1.0f});
-                }
-                count++;
-            }
+            for (int j = 0; j < face.adj_cells.size(); j++) {
+                auto cell_j = face.adj_cells[j];
+                if (!QTfluid_map.count(cell_j))
+                    continue;
+                int col = QTfluid_map[cell_j];
 
-            triplets.push_back({row, row, (float)count});
+                float val =
+                    face_weight * face.grad_coeff[i] * face.grad_coeff[j];
+                QTtriplets.push_back({row, col, val});
+            }
         }
-    }
+    };
+    for (auto &face : QTu)
+        addFace(face);
+    for (auto &face : QTv)
+        addFace(face);
+
     // Eigen solvers
     Eigen::SparseMatrix<float> A(fluid_count, fluid_count);
-    A.setFromTriplets(triplets.begin(), triplets.end());
-
+    A.setFromTriplets(QTtriplets.begin(), QTtriplets.end());
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
 
-    std::fill(p.begin(), p.end(), 0.0);
-    for (int i = 0; i < N; i++)
-        if (fluid_map[i] != -1)
-            p[i] = pressure[fluid_map[i]];
+    auto updateFace = [&](QuadtreeEdge &face) {
+        bool has_fluid = false;
+        for (auto cell : face.adj_cells)
+            has_fluid |= QTfluid_map.count(cell);
+        if (!has_fluid)
+            return;
 
-#pragma omp parallel for
-    for (int j = 0; j < ny; j++) {
-        for (int i = 1; i < nx; i++) {
-            u[IX_u(i, j)] -= (p[IX(i, j)] - p[IX(i - 1, j)]);
-        }
-    }
+        float grad_p = 0;
 
-#pragma omp parallel for
-    for (int j = 1; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            v[IX_v(i, j)] -= (p[IX(i, j)] - p[IX(i, j - 1)]);
+        for (int i = 0; i < face.adj_cells.size(); i++) {
+            auto cell = face.adj_cells[i];
+            float p_val =
+                (QTfluid_map.count(cell) ? pressure[QTfluid_map[cell]] : 0.0f);
+            grad_p += face.grad_coeff[i] * p_val;
         }
-    }
+
+        float W_prime = std::max(compute_Wk(face), 0.01f);
+        face.val -= W_prime * grad_p;
+    };
+
+    for (auto &face : QTu)
+        updateFace(face);
+    for (auto &face : QTv)
+        updateFace(face);
 }
 
-void QTSimulator::applyGravity(float dt) {
-    for (int j = 0; j < ny + 1; j++) {
-        for (int i = 0; i < nx; i++) {
-            if ((j < ny && cell_type[IX(i, j)] == 1) ||
-                (j > 0 && cell_type[IX(i, j - 1)] == 1)) {
-                v[IX_v(i, j)] += G * dt;
-            }
-        }
-    }
-}
+void QTSimulator::QTapplyGravity(float dt) {
+    for (auto &face : QTv) {
+        bool is_water = false;
+        for (auto node : face.adj_cells)
+            is_water |= (node->phi < 0.0f);
 
-void QTSimulator::applySurfaceTension(float dt) {
-    if (Sigma <= 0.0f)
-        return;
-
-    static std::vector<float> phi[2];
-    phi[0].assign(nx * ny, 0.0f);
-    phi[1].assign(nx * ny, 0.0f);
-
-#pragma omp parallel for
-    for (int i = 0; i < nx * ny; i++) {
-        phi[0][i] = (float)cell_type[i];
-    }
-
-    for (int iter = 0; iter < 2; iter++) {
-#pragma omp parallel for
-        for (int j = 1; j < ny - 1; j++) {
-            for (int i = 1; i < nx - 1; i++) {
-                phi[1 - iter][IX(i, j)] = (phi[iter][IX(i, j)] * 4.0f +
-                                           phi[iter][IX(i - 1, j)] +
-                                           phi[iter][IX(i + 1, j)] +
-                                           phi[iter][IX(i, j - 1)] +
-                                           phi[iter][IX(i, j + 1)]) /
-                                          8.0f;
-            }
-        }
-    }
-
-    static std::vector<float> nx_n, ny_n;
-    nx_n.assign(nx * ny, 0.0f);
-    ny_n.assign(nx * ny, 0.0f);
-
-#pragma omp parallel for
-    for (int j = 1; j < ny - 1; ++j) {
-        for (int i = 1; i < nx - 1; ++i) {
-            // 利用中心差分計算梯度
-            float dx = (phi[0][IX(i + 1, j)] - phi[0][IX(i - 1, j)]) * 0.5f;
-            float dy = (phi[0][IX(i, j + 1)] - phi[0][IX(i, j - 1)]) * 0.5f;
-            float len =
-                std::sqrt(dx * dx + dy * dy + 1e-8f); // 加上 1e-8 避免除以零
-            nx_n[IX(i, j)] = dx / len;
-            ny_n[IX(i, j)] = dy / len;
-        }
-    }
-
-    static std::vector<float> kappa;
-    kappa.assign(nx * ny, 0.0f);
-
-#pragma omp parallel for
-    for (int j = 1; j < ny - 1; ++j) {
-        for (int i = 1; i < nx - 1; ++i) {
-            float div_x = (nx_n[IX(i + 1, j)] - nx_n[IX(i - 1, j)]) * 0.5f;
-            float div_y = (ny_n[IX(i, j + 1)] - ny_n[IX(i, j - 1)]) * 0.5f;
-            kappa[IX(i, j)] = -(div_x + div_y);
-        }
-    }
-
-#pragma omp parallel for
-    for (int j = 1; j < ny - 1; ++j) {
-        for (int i = 2; i < nx - 1; ++i) { // 避開最外圈邊界
-            // u 面的曲率取左右格子的平均
-            float k = (kappa[IX(i, j)] + kappa[IX(i - 1, j)]) * 0.5f;
-            // u 面的顏色梯度 (直接用相鄰兩格相減)
-            float grad_phi = phi[0][IX(i, j)] - phi[0][IX(i - 1, j)];
-
-            // F = sigma * kappa * grad(phi)
-            u[IX_u(i, j)] += dt * Sigma * k * grad_phi;
-        }
-    }
-
-#pragma omp parallel for
-    for (int j = 2; j < ny - 1; ++j) {
-        for (int i = 1; i < nx - 1; ++i) {
-            // v 面的曲率取上下格子的平均
-            float k = (kappa[IX(i, j)] + kappa[IX(i, j - 1)]) * 0.5f;
-            float grad_phi = phi[0][IX(i, j)] - phi[0][IX(i, j - 1)];
-
-            v[IX_v(i, j)] += dt * Sigma * k * grad_phi;
-        }
-    }
-}
-
-void QTSimulator::markFluidCells() {
-    std::fill(cell_type.begin(), cell_type.end(), 0);
-
-#pragma omp parallel for
-    for (const auto &p : particles) {
-        int i = (int)p.x;
-        int j = (int)p.y;
-        if (i >= 0 && i < nx && j >= 0 && j < ny) {
-#pragma omp atomic write
-            cell_type[IX(i, j)] = 1; // 1 = 液體
-        }
-    }
-}
-
-void QTSimulator::resampleParticles() {
-    const int target_ppc = 4;
-    const int max_ppc = 8;
-    const int min_ppc = 3;
-
-    std::fill(particles_count.begin(), particles_count.end(), 0);
-    for (const auto &p : particles) {
-        int i = std::clamp((int)p.x, 0, nx - 1);
-        int j = std::clamp((int)p.y, 0, ny - 1);
-        particles_count[IX(i, j)]++;
-    }
-
-    std::fill(current_count.begin(), current_count.end(), 0);
-    auto new_end =
-        std::remove_if(particles.begin(), particles.end(), [&](const auto &p) {
-            int i = std::clamp((int)p.x, 0, nx - 1);
-            int j = std::clamp((int)p.y, 0, ny - 1);
-            int idx = IX(i, j);
-
-            current_count[idx]++;
-            if (current_count[idx] > max_ppc)
-                return true;
-
-            return false;
-        });
-    particles.erase(new_end, particles.end());
-
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            int idx = IX(i, j);
-
-            bool is_inter = 1;
-            if (i < nx - 1)
-                is_inter &= cell_type[IX(i + 1, j)];
-            if (i > 0)
-                is_inter &= cell_type[IX(i - 1, j)];
-            if (j < ny - 1)
-                is_inter &= cell_type[IX(i, j + 1)];
-            if (j > 0)
-                is_inter &= cell_type[IX(i, j - 1)];
-
-            if (is_inter && particles_count[idx] < min_ppc) {
-                int needed = target_ppc - particles_count[idx];
-
-                for (int k = 0; k < needed; k++) {
-                    float rx = i + ((float)rand() / RAND_MAX);
-                    float ry = j + ((float)rand() / RAND_MAX);
-
-                    float new_u = bilerp(u, nx + 1, ny, rx, ry - 0.5f);
-                    float new_v = bilerp(v, nx, ny + 1, rx - 0.5f, ry);
-
-                    particles.push_back({rx, ry, new_u, new_v});
-                }
-                cell_type[idx] = 1;
-            }
-        }
+        if (is_water)
+            face.val += G * dt;
     }
 }
 
@@ -652,47 +312,49 @@ void QTSimulator::initQuadtree(QuadtreeNode *node, int max_depth) {
     }
 }
 
-NeighborData QTSimulator::getNeighborData(QuadtreeNode *node, int direction) {
-    // 0: left
-    // 1: up
-    // 2: right
-    // 3: down
-
-    NeighborData data;
-    float h_C = node->size;
-
-    std::vector<std::pair<int, QuadtreeNode *>> neighbors;
-    getNeighbors(node, neighbors);
-    std::vector<QuadtreeNode *> tmp;
-
-    for (auto [dir, node] : neighbors)
-        if (dir == direction)
-            tmp.push_back(node);
-
-    if (tmp.empty()) {
-        data.datas = InterpolatedData(node);
-        data.distance = h_C;
-        return data;
-    }
-
-    if (tmp.size() == 1) {
-        // 情況 1 & 2：只有一個鄰居 (等大或較大)
-        QuadtreeNode *nb = tmp[0];
-        float h_nb = nb->size;
-
-        data.datas = InterpolatedData(nb);
-        data.distance = (h_C + h_nb) * 0.5f; // 中心點距離公式: (h_C + h_nb) / 2
-    } else if (tmp.size() == 2) {
-        // 情況 3：T-junction，有兩個較小的鄰居
-        auto f0 = InterpolatedData(tmp[0]);
-        auto f1 = InterpolatedData(tmp[1]);
-
-        data.datas = (f0 + f1) * 0.5f;             // 數值取平均
-        data.distance = (h_C + h_C * 0.5f) * 0.5f; // 距離為 0.75 * h_C
-    }
-
-    return data;
-}
+// NeighborData QTSimulator::getNeighborData(QuadtreeNode *node, int direction)
+// {
+//     // 0: left
+//     // 1: up
+//     // 2: right
+//     // 3: down
+//
+//     NeighborData data;
+//     float h_C = node->size;
+//
+//     std::vector<std::pair<int, QuadtreeNode *>> neighbors;
+//     getNeighbors(node, neighbors);
+//     std::vector<QuadtreeNode *> tmp;
+//
+//     for (auto [dir, node] : neighbors)
+//         if (dir == direction)
+//             tmp.push_back(node);
+//
+//     if (tmp.empty()) {
+//         data.datas = InterpolatedData(node);
+//         data.distance = h_C;
+//         return data;
+//     }
+//
+//     if (tmp.size() == 1) {
+//         // 情況 1 & 2：只有一個鄰居 (等大或較大)
+//         QuadtreeNode *nb = tmp[0];
+//         float h_nb = nb->size;
+//
+//         data.datas = InterpolatedData(nb);
+//         data.distance = (h_C + h_nb) * 0.5f; // 中心點距離公式: (h_C + h_nb)
+//         / 2
+//     } else if (tmp.size() == 2) {
+//         // 情況 3：T-junction，有兩個較小的鄰居
+//         auto f0 = InterpolatedData(tmp[0]);
+//         auto f1 = InterpolatedData(tmp[1]);
+//
+//         data.datas = (f0 + f1) * 0.5f;             // 數值取平均
+//         data.distance = (h_C + h_C * 0.5f) * 0.5f; // 距離為 0.75 * h_C
+//     }
+//
+//     return data;
+// }
 
 void QTSimulator::computeSizingFunction(QuadtreeNode *node, float dt) {
     if (!node->is_leaf) {
@@ -731,22 +393,19 @@ void QTSimulator::computeSizingFunction(QuadtreeNode *node, float dt) {
         // float geom_term = gamma_phi * laplacian;
         float geom_term = gamma_phi / (std::abs(node->phi) + 0.1f);
 
-        int i = std::clamp((int)node->x, 1, nx - 2);
-        int j = std::clamp((int)node->y, 1, ny - 2);
+        float ul = getVelocity(QTu, node->ul_id);
+        float ur = getVelocity(QTu, node->ur_id);
+        float vl = getVelocity(QTv, node->vl_id);
+        float vr = getVelocity(QTv, node->vr_id);
 
-        float du_dx = std::abs(u[IX_u(i + 1, j)] - u[IX_u(i, j)]);
-        float dv_dy = std::abs(v[IX_v(i, j + 1)] - v[IX_v(i, j)]);
+        float du_dx = (ul - ur) / node->size;
+        float dv_dy = (vl - vr) / node->size;
+
         float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
 
         float S = geom_term + vel_term;
 
-        float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
-        float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
-
-        float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
-        float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
-
-        auto data = MLSinterpolate(past_x, past_y);
+        auto data = advect(node->x, node->y, dt);
         float S_star = data.S;
 
         node->S_new = std::max(R_t * S_star, S);
@@ -782,14 +441,11 @@ void QTSimulator::propagateSizingFunction() {
         for (int i = 0; i < leaves.size(); i++) {
             auto node = leaves[i];
 
-            std::vector<std::pair<int, QuadtreeNode *>> neighbors;
-            getNeighbors(node, neighbors);
-
             float self_area = node->size * node->size;
             node->S_new = node->S * self_area;
 
             float total_area = self_area;
-            for (auto [_, n] : neighbors) {
+            for (auto n : node->cached_neighbors) {
 
                 float area = n->size * n->size;
                 node->S_new += std::max(n->S, node->S) * area;
@@ -807,13 +463,7 @@ void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
     if (node->size < 1.5f)
         return;
 
-    float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
-    float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
-
-    float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
-    float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
-
-    auto advected_data = MLSinterpolate(past_x, past_y);
+    auto advected_data = advect(node->x, node->y, dt);
     auto data = MLSinterpolate(node->x, node->y);
 
     float exp_phi = advected_data.phi;
@@ -828,6 +478,19 @@ void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
     }
 }
 
+InterpolatedData QTSimulator::advect(float x, float y, float dt) {
+    auto current_data = MLSinterpolate(x, y);
+    // float u_val = bilerp(u, nx + 1, ny, x, y);
+    // float v_val = bilerp(v, nx, ny + 1, x, y);
+    float u_val = current_data.u;
+    float v_val = current_data.v;
+
+    float past_x = std::clamp(x - u_val * dt, 0.0f, (float)nx);
+    float past_y = std::clamp(y - v_val * dt, 0.0f, (float)ny);
+
+    return MLSinterpolate(past_x, past_y);
+}
+
 void QTSimulator::advectQuadtreeDatas(QuadtreeNode *node, float dt) {
     if (!node->is_leaf) {
         for (int i = 0; i < 4; i++)
@@ -835,15 +498,28 @@ void QTSimulator::advectQuadtreeDatas(QuadtreeNode *node, float dt) {
         return;
     }
 
-    float u_val = bilerp(u, nx + 1, ny, node->x, node->y);
-    float v_val = bilerp(v, nx, ny + 1, node->x, node->y);
+    auto advected_node = advect(node->x, node->y, dt);
+    node->phi = advected_node.phi;
+    node->S = advected_node.S;
+    node->pressure = advected_node.pressure;
 
-    float past_x = std::clamp(node->x - u_val * dt, 0.0f, (float)nx);
-    float past_y = std::clamp(node->y - v_val * dt, 0.0f, (float)ny);
+    auto advectFace = [this, dt](QuadtreeEdge &face, bool is_u) {
+        auto advected_face = advect(face.x, face.y, dt);
+        if (is_u)
+            face.val = advected_face.u;
+        else
+            face.val = advected_face.v;
+        face.advected = true;
+    };
 
-    auto advected_data = MLSinterpolate(past_x, past_y);
-    node->phi = advected_data.phi;
-    node->S = advected_data.S;
+    if (!QTu_new[node->ul_id].advected)
+        advectFace(QTu_new[node->ul_id], true);
+    if (!QTu_new[node->ur_id].advected)
+        advectFace(QTu_new[node->ur_id], true);
+    if (!QTv_new[node->vl_id].advected)
+        advectFace(QTv_new[node->vl_id], false);
+    if (!QTv_new[node->vr_id].advected)
+        advectFace(QTv_new[node->vr_id], false);
 }
 
 void QTSimulator::redistancing(QuadtreeNode *new_root) {
@@ -859,20 +535,23 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
     std::vector<QuadtreeNode *> leaves;
     collectLeafNodes(new_root, leaves);
     for (auto leaf : leaves) {
-        if (0.0f <= leaf->phi && leaf->phi < leaf->size * 1.5f) {
+        if (0.0f <= leaf->phi && leaf->phi < 0.5) {
+            // if (0.0f <= leaf->phi && leaf->phi < leaf->size * 1.5f) {
 
-            auto nearest_p = nearestParticle(leaf->x, leaf->y, leaf->size / 2);
-
-            if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-                leaf->phi_new = std::numeric_limits<float>::infinity();
-                continue;
-            }
-
-            float dist = std::sqrt(
-                (leaf->x - nearest_p.x) * (leaf->x - nearest_p.x) +
-                (leaf->y - nearest_p.y) * (leaf->y - nearest_p.y)
-            );
-            leaf->phi_new = dist;
+            // auto nearest_p = nearestParticle(leaf->x, leaf->y, leaf->size /
+            // 2);
+            //
+            // if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
+            //     leaf->phi_new = std::numeric_limits<float>::infinity();
+            //     continue;
+            // }
+            //
+            // float dist = std::sqrt(
+            //     (leaf->x - nearest_p.x) * (leaf->x - nearest_p.x) +
+            //     (leaf->y - nearest_p.y) * (leaf->y - nearest_p.y)
+            // );
+            // leaf->phi_new = dist;
+            leaf->phi_new = leaf->phi;
             pq.push(leaf);
         } else {
             leaf->phi_new = std::numeric_limits<float>::infinity();
@@ -891,18 +570,13 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
             continue;
         curr_node->known = true;
 
-        std::vector<std::pair<int, QuadtreeNode *>> neighbors;
-        getNeighbors(curr_node, neighbors);
-
-        for (auto [_, neighbor] : neighbors) {
+        for (auto neighbor : curr_node->cached_neighbors) {
             float dist = std::sqrt(
                 pow(curr_node->x - neighbor->x, 2) +
                 pow(curr_node->y - neighbor->y, 2)
             );
-            int ni = std::clamp((int)neighbor->x, 0, nx - 1);
-            int nj = std::clamp((int)neighbor->y, 0, ny - 1);
 
-            dist = cell_type[IX(ni, nj)] ? -dist : dist;
+            dist = neighbor->phi < 0 ? -dist : dist;
 
             float proposed_phi_new = curr_node->phi_new + dist;
 
@@ -915,35 +589,37 @@ void QTSimulator::redistancing(QuadtreeNode *new_root) {
     commitQuadtreePhi(new_root);
 }
 
-Particle QTSimulator::nearestParticle(float x, float y, float radius) {
-    int ix = std::clamp((int)x, 0, nx - 1);
-    int iy = std::clamp((int)y, 0, ny - 1);
-
-    Particle result{1e6, 1e6};
-    float min_dis = 1e6;
-    for (int j = -radius; j <= radius; j++) {
-        for (int i = -radius; i <= radius; i++) {
-            int ni = ix + i, nj = iy + j;
-
-            if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
-                continue;
-
-            for (int idx : particle_idx[IX(ni, nj)]) {
-                auto &p = particles[idx];
-
-                float tmp_dis = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
-                if (tmp_dis < min_dis) {
-                    min_dis = tmp_dis;
-                    result = p;
-                }
-            }
-        }
-    }
-    return result;
-}
+// Particle QTSimulator::nearestParticle(float x, float y, float radius) {
+//     int ix = std::clamp((int)x, 0, nx - 1);
+//     int iy = std::clamp((int)y, 0, ny - 1);
+//
+//     Particle result{1e6, 1e6};
+//     float min_dis = 1e6;
+//     for (int j = -radius; j <= radius; j++) {
+//         for (int i = -radius; i <= radius; i++) {
+//             int ni = ix + i, nj = iy + j;
+//
+//             if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
+//                 continue;
+//
+//             for (int idx : particle_idx[IX(ni, nj)]) {
+//                 auto &p = particles[idx];
+//
+//                 float tmp_dis = (p.x - x) * (p.x - x) + (p.y - y) * (p.y -
+//                 y); if (tmp_dis < min_dis) {
+//                     min_dis = tmp_dis;
+//                     result = p;
+//                 }
+//             }
+//         }
+//     }
+//     return result;
+// }
 
 void QTSimulator::getNeighbors(
-    QuadtreeNode *node, std::vector<std::pair<int, QuadtreeNode *>> &neighbors
+    QuadtreeNode *new_root,
+    QuadtreeNode *node,
+    std::vector<std::pair<int, QuadtreeNode *>> &neighbors
 ) {
     // 0: left
     // 1: up
@@ -982,7 +658,7 @@ void QTSimulator::getNeighbors(
             continue;
         }
 
-        QuadtreeNode *neighbor = getNodeAt(root, qx, qy);
+        QuadtreeNode *neighbor = getNodeAt(new_root, qx, qy);
 
         if (neighbor && neighbor != node) {
             neighbors.push_back({i / 2, neighbor});
@@ -1003,6 +679,11 @@ void QTSimulator::subdivideNode(QuadtreeNode *node) {
         float x = node->x + (i & 1 ? 1.f : -1.f) * child_size / 2.f;
         float y = node->y + (i & 2 ? 1.f : -1.f) * child_size / 2.f;
         node->children[i] = new QuadtreeNode{x, y, child_size, node->depth + 1};
+        node->children[i]->ul_id = node->ul_id;
+        node->children[i]->ur_id = node->ur_id;
+        node->children[i]->vl_id = node->vl_id;
+        node->children[i]->vr_id = node->vr_id;
+        node->cached_neighbors.resize(8);
     }
 }
 void QTSimulator::smoothing(QuadtreeNode *new_root) {
@@ -1039,7 +720,7 @@ void QTSimulator::smoothing(QuadtreeNode *new_root) {
 
             auto neighbor = getNodeAt(new_root, x, y);
 
-            if (node->depth - neighbor->depth > 1) {
+            if (neighbor && node->depth - neighbor->depth > 1) {
                 subdivideNode(neighbor);
                 for (int c = 0; c < 4; c++) {
                     neighbor->children[c]->phi = neighbor->phi;
@@ -1083,6 +764,8 @@ void QTSimulator::recursiveFree(QuadtreeNode *node) {
 
 QuadtreeNode *
 QTSimulator::getNodeAt(QuadtreeNode *node, float x, float y) const {
+    if (x < 0 || x > nx || y < 0 || y > ny)
+        return nullptr;
     if (node->is_leaf)
         return node;
 
@@ -1134,14 +817,48 @@ void QTSimulator::collectLeafNodes(
     }
 }
 
+// ######################### MLS #########################
+struct SamplePoint {
+    float x, y; // 採樣點的物理座標（細胞中心或邊中心）
+    float h;    // 該點對應的網格尺寸
+    float val;  // 該點的數值
+};
+
+// 1D 變數的 MLS 求解輔助函式
+float solveMLS(float x, float y, const std::vector<SamplePoint> &samples) {
+    if (samples.empty())
+        return 0.0f;
+
+    Eigen::Matrix3f A = Eigen::Matrix3f::Zero();
+    Eigen::Vector3f b = Eigen::Vector3f::Zero();
+
+    for (const auto &p : samples) {
+        float dx = std::abs(p.x - x);
+        float dy = std::abs(p.y - y);
+        float h = p.h;
+
+        float eps = 1e-2f;
+        float wx = std::max(1.f - (dx / h), eps);
+        float wy = std::max(1.f - (dy / h), eps);
+        float weight = wx * wy;
+
+        float lx = p.x - x;
+        float ly = p.y - y;
+        Eigen::Vector3f z_i(lx, ly, 1.f);
+
+        A += weight * (z_i * z_i.transpose());
+        b += weight * z_i * p.val;
+    }
+
+    // 脊迴歸懲罰項，確保 A 在共線或極端情況下仍可逆
+    A += Eigen::Matrix3f::Identity() * 1e-6f;
+
+    Eigen::Vector3f c = A.ldlt().solve(b);
+    return c(2); // 局部座標系下，常數項即為 (0,0) 擬合值，對應索引 2
+}
+
 InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
-    struct VirtualNode {
-        float x, y;
-        float h; // 保存該點對應的網格尺寸
-        float S, phi, pressure;
-        float ul, ur, vl, vr;
-    };
-    InterpolatedData result = {0.0f, 1000.f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    InterpolatedData result = {0.0f, 1000.f, 0.0f, 0.0f, 0.0f};
 
     QuadtreeNode *target = getNodeAt(root, x, y);
     if (!target)
@@ -1151,150 +868,381 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     std::vector<QuadtreeNode *> neighbors;
     getNodesIn(root, x, y, search_radius, neighbors);
 
-    // 1. 建立點集，並執行邊界鏡像 (Mirroring)
-    std::vector<VirtualNode> points;
     float min_x = 0.0f;
-    float max_x = nx; // 你的模擬域邊界
+    float max_x = nx;
     float min_y = 0.0f;
     float max_y = ny;
 
+    // ==========================================================
+    // 1. 細胞中心變數插值 (S, phi, pressure)
+    // ==========================================================
+    struct CellNode {
+        float x, y, h;
+        float S, phi, pressure;
+    };
+    std::vector<CellNode> cell_points;
+
     for (auto n : neighbors) {
+        cell_points.push_back({n->x, n->y, n->size, n->S, n->phi, n->pressure});
 
-        // 放入原始節點
-        points.push_back(
-            {n->x,
-             n->y,
-             n->size,
-             n->S,
-             n->phi,
-             n->pressure,
-             n->ul,
-             n->ur,
-             n->vl,
-             n->vr}
-        );
-
-        // 檢查是否靠近邊界，若靠近則生成鏡像點 (Ghost Node)
+        // 檢查細胞邊界鏡像 (Mirroring)
         float dist_left = n->x - min_x;
         float dist_right = max_x - n->x;
-        float dist_bottom = n->y - min_y;
-        float dist_top = max_y - n->y;
+        float dist_top = n->y - min_y;
+        float dist_bottom = max_y - n->y;
         float threshold = n->size * 1.5f;
 
         bool mirror_x = false;
         float mx = n->x;
         if (dist_left < threshold) {
             mirror_x = true;
-            mx = min_x - dist_left; // 向左鏡像
+            mx = min_x - dist_left;
         } else if (dist_right < threshold) {
             mirror_x = true;
-            mx = max_x + dist_right; // 向右鏡像
+            mx = max_x + dist_right;
         }
 
         bool mirror_y = false;
         float my = n->y;
-        if (dist_bottom < threshold) {
+        if (dist_top < threshold) {
             mirror_y = true;
-            my = min_y - dist_bottom; // 向下鏡像
-        } else if (dist_top < threshold) {
+            my = min_y - dist_top;
+        } else if (dist_bottom < threshold) {
             mirror_y = true;
-            my = max_y + dist_top; // 向上鏡像
+            my = max_y + dist_bottom;
         }
 
-        // 插入 X 方向鏡像點
-        if (mirror_x) {
-            points.push_back(
-                {mx,
-                 n->y,
-                 n->size,
-                 n->S,
-                 n->phi,
-                 n->pressure,
-                 n->ul,
-                 n->ur,
-                 n->vl,
-                 n->vr}
+        if (mirror_x)
+            cell_points.push_back(
+                {mx, n->y, n->size, n->S, n->phi, n->pressure}
             );
-        }
-        // 插入 Y 方向鏡像點
-        if (mirror_y) {
-            points.push_back(
-                {n->x,
-                 my,
-                 n->size,
-                 n->S,
-                 n->phi,
-                 n->pressure,
-                 n->ul,
-                 n->ur,
-                 n->vl,
-                 n->vr}
+        if (mirror_y)
+            cell_points.push_back(
+                {n->x, my, n->size, n->S, n->phi, n->pressure}
             );
-        }
-        // 插入角落雙重鏡像點
-        if (mirror_x && mirror_y) {
-            points.push_back(
-                {mx,
-                 my,
-                 n->size,
-                 n->S,
-                 n->phi,
-                 n->pressure,
-                 n->ul,
-                 n->ur,
-                 n->vl,
-                 n->vr}
-            );
-        }
+        if (mirror_x && mirror_y)
+            cell_points.push_back({mx, my, n->size, n->S, n->phi, n->pressure});
     }
 
-    // 2. 進行 MLS 求解 (使用局部座標系)
-    Eigen::Matrix3f A = Eigen::Matrix3f::Zero();
-    Eigen::MatrixXf b(3, 7);
-    b.setZero();
+    // 求解細胞中心變數
+    Eigen::Matrix3f A_cell = Eigen::Matrix3f::Zero();
+    Eigen::MatrixXf b_cell(3, 3);
+    b_cell.setZero();
 
-    for (const auto &p_node : points) {
+    for (const auto &p_node : cell_points) {
         float dx = std::abs(p_node.x - x);
         float dy = std::abs(p_node.y - y);
         float h = p_node.h;
 
-        // 引入論文中的安全常數 eps = 1e-2 防止權重降為零
         float eps = 1e-2f;
         float wx = std::max(1.f - (dx / h), eps);
         float wy = std::max(1.f - (dy / h), eps);
         float weight = wx * wy;
 
-        // 改用局部座標系 (以查詢點 x, y 作為原點)
         float lx = p_node.x - x;
         float ly = p_node.y - y;
         Eigen::Vector3f z_i(lx, ly, 1.f);
 
-        A += weight * (z_i * z_i.transpose());
-        b.col(0) += weight * z_i * p_node.S;
-        b.col(1) += weight * z_i * p_node.phi;
-        b.col(2) += weight * z_i * p_node.pressure;
-        b.col(3) += weight * z_i * p_node.ul;
-        b.col(4) += weight * z_i * p_node.ur;
-        b.col(5) += weight * z_i * p_node.vl;
-        b.col(6) += weight * z_i * p_node.vr;
+        A_cell += weight * (z_i * z_i.transpose());
+        b_cell.col(0) += weight * z_i * p_node.S;
+        b_cell.col(1) += weight * z_i * p_node.phi;
+        b_cell.col(2) += weight * z_i * p_node.pressure;
     }
+    A_cell += Eigen::Matrix3f::Identity() * 1e-6f;
+    Eigen::MatrixXf c_cell = A_cell.ldlt().solve(b_cell);
 
-    // 微小的脊回歸（Ridge Regression）懲罰項，確保 A 在極端情況下仍可逆
-    A += Eigen::Matrix3f::Identity() * 1e-6;
+    result.S = c_cell(2, 0);
+    result.phi = c_cell(2, 1);
+    result.pressure = c_cell(2, 2);
 
-    // 求解係數矩陣
-    Eigen::MatrixXf c = A.ldlt().solve(b);
+    // ==========================================================
+    // 2. u 速度插值 (垂直邊上的速度)
+    // ==========================================================
+    std::vector<SamplePoint> u_samples;
+    std::unordered_set<int> visited_u_faces;
 
-    // 由於我們使用的是局部座標，查詢點在局部座標下就是 (0, 0, 1)
-    // 擬合方程式在 (0, 0) 的值即為常數項，也就是 c 矩陣的最後一列（第 2
-    // 列，索引從 0 開始）
-    result.S = c(2, 0);
-    result.phi = c(2, 1);
-    result.pressure = c(2, 2);
-    result.ul = c(2, 3);
-    result.ur = c(2, 4);
-    result.vl = c(2, 5);
-    result.vr = c(2, 6);
+    for (auto n : neighbors) {
+        // 假設你的 Node 中存有左右垂直邊的面索引 (face indices)
+        // 論文提到 T-junction 會自動對齊到大 parent face 取得單一速度值
+        int left_face = n->ul_id;
+        int right_face = n->ur_id;
+
+        auto add_u_face = [&](int face_idx) {
+            if (face_idx == -1 || visited_u_faces.count(face_idx))
+                return;
+            visited_u_faces.insert(face_idx);
+
+            auto &face = QTu[face_idx];
+            float val = face.val; // 全域速度陣列
+            float face_x = face.x;
+            float face_y = face.y;
+            float face_h = face.length;
+            u_samples.push_back({face_x, face_y, face_h, val});
+
+            // 垂直邊邊界鏡像 (以物理邊界條件處理速度)
+            float dist_left = face_x - min_x;
+            float dist_right = max_x - face_x;
+            float dist_top = face_y - min_y;
+            float dist_bottom = max_y - face_y;
+            float threshold = face_h * 1.5f;
+
+            bool mirror_x = false;
+            float mx = face_x;
+            float m_val_x = val;
+            if (dist_left < threshold) {
+                mirror_x = true;
+                mx = min_x - dist_left;
+                m_val_x = -val; // 固體邊界法向速度反向 (消去穿透流)
+            } else if (dist_right < threshold) {
+                mirror_x = true;
+                mx = max_x + dist_right;
+                m_val_x = -val;
+            }
+
+            bool mirror_y = false;
+            float my = face_y;
+            float m_val_y = val;
+            if (dist_top < threshold) {
+                mirror_y = true;
+                my = min_y - dist_top;
+                m_val_y = val; // 滑動邊界 (Slip BC) 切向速度同向
+            } else if (dist_bottom < threshold) {
+                mirror_y = true;
+                my = max_y + dist_bottom;
+                m_val_y = val;
+            }
+
+            if (mirror_x)
+                u_samples.push_back({mx, face_y, face_h, m_val_x});
+            if (mirror_y)
+                u_samples.push_back({face_x, my, face_h, m_val_y});
+            if (mirror_x && mirror_y)
+                u_samples.push_back({mx, my, face_h, -m_val_x});
+        };
+
+        // 垂直邊的 X 座標在細胞中心左右，Y 座標與細胞同高
+        float h = n->size;
+        add_u_face(left_face);
+        add_u_face(right_face);
+    }
+    result.u = solveMLS(x, y, u_samples);
+
+    // ==========================================================
+    // 3. v 速度插值 (水平邊上的速度)
+    // ==========================================================
+    std::vector<SamplePoint> v_samples;
+    std::unordered_set<int> visited_v_faces;
+
+    for (auto n : neighbors) {
+        int top_face = n->vl_id;
+        int bottom_face = n->vr_id;
+
+        auto add_v_face = [&](int face_idx) {
+            if (face_idx == -1 || visited_v_faces.count(face_idx))
+                return;
+            visited_v_faces.insert(face_idx);
+
+            auto &face = QTv[face_idx];
+            float val = face.val; // 全域速度陣列
+            float face_x = face.x;
+            float face_y = face.y;
+            float face_h = face.length;
+            v_samples.push_back({face_x, face_y, face_h, val});
+
+            // 水平邊邊界鏡像
+            float dist_left = face_x - min_x;
+            float dist_right = max_x - face_x;
+            float dist_top = face_y - min_y;
+            float dist_bottom = max_y - face_y;
+            float threshold = face_h * 1.5f;
+
+            bool mirror_x = false;
+            float mx = face_x;
+            float m_val_x = val;
+            if (dist_left < threshold) {
+                mirror_x = true;
+                mx = min_x - dist_left;
+                m_val_x = val; // 滑動邊界 (Slip BC) 切向速度同向
+            } else if (dist_right < threshold) {
+                mirror_x = true;
+                mx = max_x + dist_right;
+                m_val_x = val;
+            }
+
+            bool mirror_y = false;
+            float my = face_y;
+            float m_val_y = val;
+            if (dist_top < threshold) {
+                mirror_y = true;
+                my = min_y - dist_top;
+                m_val_y = -val; // 固體邊界法向速度反向 (消去穿透流)
+            } else if (dist_bottom < threshold) {
+                mirror_y = true;
+                my = max_y + dist_bottom;
+                m_val_y = -val;
+            }
+
+            if (mirror_x)
+                v_samples.push_back({mx, face_y, face_h, m_val_x});
+            if (mirror_y)
+                v_samples.push_back({face_x, my, face_h, m_val_y});
+            if (mirror_x && mirror_y)
+                v_samples.push_back({mx, my, face_h, -m_val_y});
+        };
+
+        // 水平邊的 Y 座標在細胞中心上下，X 座標與細胞同寬
+        float h = n->size;
+        add_v_face(bottom_face);
+        add_v_face(top_face);
+    }
+    result.v = solveMLS(x, y, v_samples);
 
     return result;
+}
+
+void QTSimulator::findAllEdges(QuadtreeNode *new_root) {
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(new_root, leaves);
+
+    sort(leaves.begin(), leaves.end(), [](QuadtreeNode *a, QuadtreeNode *b) {
+        if (a->depth != b->depth)
+            return a->depth < b->depth;
+        if (a->x != b->x)
+            return a->x < b->x;
+        return a->y < b->y;
+    });
+
+    QTu_new.clear();
+    QTv_new.clear();
+    for (auto leaf : leaves) {
+
+        float half_size = leaf->size / 2.f;
+        float quad_size = leaf->size / 4.f;
+        float step = half_size + 0.1f;
+
+        int node_idx = 0;
+        auto &nodes = leaf->cached_neighbors;
+        for (int dir = 0; dir < 4; dir++) {
+            int neighbot_cnt = leaf->neighbor_cnt[dir];
+
+            float x = leaf->x, y = leaf->y, solid_frac = 0;
+            int face_sgn;
+            std::vector<QuadtreeNode *> adj_cells = {leaf};
+            std::vector<float> coefs;
+
+            // up or down, need update y
+            if (dir & 1) {
+                y += (dir & 2 ? half_size : -half_size);
+            }
+            // left or right, need update x
+            else {
+                x += (dir & 2 ? half_size : -half_size);
+            }
+
+            if (dir == 0)
+                leaf->ul_id = QTu_new.size();
+            if (dir == 1)
+                leaf->vl_id = QTv_new.size();
+            if (dir == 2)
+                leaf->ur_id = QTu_new.size();
+            if (dir == 3)
+                leaf->vr_id = QTv_new.size();
+
+            if (dir <= 1) // left and up
+                face_sgn = -1;
+            else // right and down
+                face_sgn = 1;
+
+            if (neighbot_cnt == 0) {
+                coefs.assign({0});
+                solid_frac = 1;
+            } else if (neighbot_cnt == 2) {
+                adj_cells.push_back(nodes[node_idx]);
+                adj_cells.push_back(nodes[node_idx + 1]);
+
+                float coef = face_sgn * 1.f / (1.5f * nodes[node_idx]->size);
+                coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
+            } else if (neighbot_cnt == 1) {
+                if (nodes[node_idx]->depth == leaf->depth) {
+                    if (dir <= 1)
+                        goto OVERLAY_NODE;
+
+                    adj_cells.push_back(nodes[node_idx]);
+                    float coef = face_sgn * 1.f / leaf->size;
+                    coefs.assign({-coef, coef});
+                    goto UPDATE;
+                }
+
+            OVERLAY_NODE:
+                switch (dir) {
+                case 0:
+                    leaf->ul_id = nodes[0]->ur_id;
+                    break;
+                case 1:
+                    leaf->vl_id = nodes[0]->vr_id;
+                    break;
+                case 2:
+                    leaf->ur_id = nodes[0]->ul_id;
+                    break;
+                case 3:
+                    leaf->vr_id = nodes[0]->vl_id;
+                    break;
+                }
+                node_idx += neighbot_cnt;
+                continue;
+            } else {
+                std::cout << "Some ERROR appear" << std::endl;
+                continue;
+            }
+
+        UPDATE:
+            // up or down, push into v
+            if (dir & 1)
+                QTv_new.push_back({
+                    x,
+                    y,
+                    leaf->size,
+                    0,
+                    solid_frac,
+                    adj_cells,
+                    coefs,
+                });
+            // left or right, push into u
+            else
+                QTu_new.push_back({
+                    x,
+                    y,
+                    leaf->size,
+                    0,
+                    solid_frac,
+                    adj_cells,
+                    coefs,
+                });
+
+            node_idx += neighbot_cnt;
+        }
+    }
+}
+
+float QTSimulator::getVelocity(std::vector<QuadtreeEdge> &field, int id) {
+    if (id == -1)
+        return 0.0f;
+    return field[id].val;
+}
+
+void QTSimulator::cacheNeighbors(QuadtreeNode *new_root) {
+    std::vector<QuadtreeNode *> leaves;
+    collectLeafNodes(new_root, leaves);
+
+    for (auto leaf : leaves) {
+
+        std::vector<std::pair<int, QuadtreeNode *>> neighbors;
+        getNeighbors(new_root, leaf, neighbors);
+
+        std::vector<QuadtreeNode *> direc_neigh[4];
+        for (auto [dir, node] : neighbors) {
+            leaf->cached_neighbors.push_back(node);
+            leaf->neighbor_cnt[dir]++;
+        }
+    }
 }

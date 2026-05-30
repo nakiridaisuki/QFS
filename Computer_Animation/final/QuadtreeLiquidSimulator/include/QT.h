@@ -16,60 +16,60 @@ struct QuadtreeNode {
     bool known = false;
     QuadtreeNode *children[4] = {nullptr};
 
-    // signed distance to surface, > 0 if inter water
+    // signed distance to surface, < 0 if inter water
     float phi = std::numeric_limits<float>::infinity(), phi_new;
     // size function
     float S = 0.0f, S_new = 0.0f;
     float pressure = 0.0f;
-    float ul = 0.0f, ur = 0.0f, vl = 0.0f, vr = 0.0f;
+    int ul_id = -1, ur_id = -1, vl_id = -1, vr_id = -1;
+    std::vector<QuadtreeNode *> cached_neighbors;
+    int neighbor_cnt[4] = {0};
+};
+
+struct QuadtreeEdge {
+    float x, y;
+    float length;
+    float val = 0;
+    float solid_fraction = 0;
+    std::vector<QuadtreeNode *> adj_cells;
+    std::vector<float> grad_coeff;
+    bool advected = false;
 };
 
 struct InterpolatedData {
-    float S, phi, pressure, ul, ur, vl, vr;
+    float S, phi, pressure, u = 0, v = 0;
 
-    InterpolatedData() = default;
-    InterpolatedData(
-        float s, float p, float pr, float u_l, float u_r, float v_l, float v_r
-    )
-        : S(s), phi(p), pressure(pr), ul(u_l), ur(u_r), vl(v_l), vr(v_r) {}
-
-    InterpolatedData(const QuadtreeNode *node) {
-        if (node) {
-            S = node->S;
-            phi = node->phi;
-            pressure = node->pressure;
-            ul = node->ul;
-            ur = node->ur;
-            vl = node->vl;
-            vr = node->vr;
-        } else {
-            S = phi = pressure = ul = ur = vl = vr = 0.0f;
-        }
-    }
-
-    InterpolatedData operator+(const InterpolatedData &x) const {
-        return InterpolatedData{
-            S + x.S,
-            phi + x.phi,
-            pressure + x.pressure,
-            ul + x.ul,
-            ur + x.ur,
-            vl + x.vl,
-            vr + x.vr
-        };
-    }
-
-    InterpolatedData operator*(const float x) const {
-        return InterpolatedData{
-            S * x, phi * x, pressure * x, ul * x, ur * x, vl * x, vr * x
-        };
-    }
+    // InterpolatedData() = default;
+    // InterpolatedData(float s, float p, float pr) : S(s), phi(p), pressure(pr)
+    // {}
+    //
+    // InterpolatedData(const QuadtreeNode *node) {
+    //     if (node) {
+    //         S = node->S;
+    //         phi = node->phi;
+    //         pressure = node->pressure;
+    //     } else {
+    //         S = phi = pressure = 0.0f;
+    //     }
+    // }
+    //
+    // InterpolatedData operator+(const InterpolatedData &x) const {
+    //     return InterpolatedData{
+    //         S + x.S,
+    //         phi + x.phi,
+    //         pressure + x.pressure,
+    //     };
+    // }
+    //
+    // InterpolatedData operator*(const float x) const {
+    //     return InterpolatedData{S * x, phi * x, pressure * x};
+    // }
 };
 
-struct NeighborData {
-    InterpolatedData datas;
-    float distance;
-};
+// struct NeighborData {
+//     InterpolatedData datas;
+//     float distance;
+// };
 
 class QTSimulator : public BaseSimulator {
   private:
@@ -84,33 +84,19 @@ class QTSimulator : public BaseSimulator {
     // v for column velocity
     // p for pressure
     std::vector<Particle> particles;
-    std::vector<float> u, v, p, u_old, v_old;
-    std::vector<float> weight_u, weight_v;
     std::vector<int> cell_type, particles_count, current_count, fluid_map;
-    std::vector<Eigen::Triplet<float>> triplets;
-    std::vector<std::vector<int>> particle_idx;
     Eigen::ConjugateGradient<
         Eigen::SparseMatrix<float>,
         Eigen::Lower | Eigen::Upper>
         solver;
 
-    // index calculator
-    int IX(int i, int j) const { return i + j * nx; }
-    int IX_u(int i, int j) const { return i + j * (nx + 1); }
-    int IX_v(int i, int j) const { return i + j * nx; }
+    std::vector<QuadtreeEdge> QTu, QTv, QTu_new, QTv_new;
 
-    // main simulation functions
-    void particleToGrid();
-    void gridToParticle();
-    void velExtrapolation();
-    void advectParticles(float dt);
-    void buildNewTree(float dt);
-    void applyGravity(float dt);
-    void applySurfaceTension(float dt);
-    void markFluidCells();
-    void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
-    void project();
     void updateParticleIdx();
+
+    // Quad Tree simulation functions
+    void QTapplyGravity(float dt);
+    void QTproject();
 
     // Quad Tree functions
     void initQuadtree(QuadtreeNode *node, int max_depth);
@@ -126,7 +112,12 @@ class QTSimulator : public BaseSimulator {
     void redistancing(QuadtreeNode *root);
     void smoothing(QuadtreeNode *new_root);
 
+    void findAllEdges(QuadtreeNode *new_root);
+
     // util functions
+    void cacheNeighbors(QuadtreeNode *new_root);
+    float getVelocity(std::vector<QuadtreeEdge> &field, int id);
+    InterpolatedData advect(float x, float y, float dt);
     QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y) const;
     void getNodesIn(
         QuadtreeNode *node,
@@ -136,10 +127,11 @@ class QTSimulator : public BaseSimulator {
         std::vector<QuadtreeNode *> &nodes
     );
     void getNeighbors(
+        QuadtreeNode *root,
         QuadtreeNode *node,
         std::vector<std::pair<int, QuadtreeNode *>> &neighbors
     );
-    NeighborData getNeighborData(QuadtreeNode *node, int direction);
+    // NeighborData getNeighborData(QuadtreeNode *node, int direction);
     Particle nearestParticle(float x, float y, float radius);
     void commitQuadtreeS(QuadtreeNode *node);
     void commitQuadtreePhi(QuadtreeNode *node);

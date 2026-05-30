@@ -62,6 +62,36 @@ class FluidRenderer {
         float scaleX = (float)screenWidth / nx;
         float scaleY = (float)screenHeight / ny;
 
+        if (showPhi) {
+            try {
+                const QTSimulator &qt_sim =
+                    dynamic_cast<const QTSimulator &>(sim);
+                for (int j = 0; j < ny; j++) {
+                    for (int i = 0; i < nx; i++) {
+                        int idx = i + j * nx;
+                        float phi =
+                            qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
+                                ->phi;
+
+                        auto color = BLACK;
+                        if (phi < 0)
+                            color = Color{0, 50, 100, 255};
+
+                        pixels[idx] = color;
+                    }
+                }
+                UpdateTexture(texture, pixels);
+
+                Rectangle source = {0, 0, (float)nx, (float)ny};
+                Rectangle dest = {
+                    0, 0, (float)screenWidth, (float)screenHeight
+                };
+                DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
+            } catch (const std::bad_cast &e) {
+                std::cout << "Cast failed: " << e.what() << std::endl;
+            }
+        }
+
         if (showGrid) {
             Color gridColor = Fade(DARKGRAY, 0.8f); // 使用半透明的深灰色
 
@@ -84,34 +114,6 @@ class FluidRenderer {
                 float py = p.y * scaleY;
 
                 DrawPixel((int)px, (int)py, RED);
-            }
-        }
-
-        if (showPhi) {
-            try {
-                const QTSimulator &qt_sim =
-                    dynamic_cast<const QTSimulator &>(sim);
-                for (int j = 0; j < ny; j++) {
-                    for (int i = 0; i < nx; i++) {
-                        int idx = i + j * nx;
-                        float phi =
-                            qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
-                                ->phi;
-
-                        unsigned char color =
-                            std::clamp(int(20.0 * std::abs(phi)), 0, 255);
-                        pixels[idx] = Color{color, 50, 0, 50};
-                    }
-                }
-                UpdateTexture(texture, pixels);
-
-                Rectangle source = {0, 0, (float)nx, (float)ny};
-                Rectangle dest = {
-                    0, 0, (float)screenWidth, (float)screenHeight
-                };
-                DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
-            } catch (const std::bad_cast &e) {
-                std::cout << "Cast failed: " << e.what() << std::endl;
             }
         }
     }

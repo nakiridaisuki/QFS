@@ -26,7 +26,7 @@ int main() {
     // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)
     GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
 
-    sim.addWater(sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 25.0f);
+    sim.addWater(sim.getWidth() / 2.0f, sim.getHeight() * 0.5f, 5.0f);
 
     // === UI 需要的參數變數 ===
     float brushRadius = 4.0f;

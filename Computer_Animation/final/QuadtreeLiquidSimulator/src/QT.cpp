@@ -13,7 +13,6 @@
 
 // PUBLIC
 QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
-    cell_type.resize(nx * ny, 0);
     particle_idx.resize(nx * ny, std::vector<int>(8));
     G = 150.f;
     Sigma = 0.0f;
@@ -22,21 +21,65 @@ QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
     solver.setTolerance(1e-3);
     Eigen::setNbThreads(6);
 
-    root = new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
-    initQuadtree(root, 3);
+    root_list = 0;
+    allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
+    initQuadtree(3, root_list);
 }
 void QTSimulator::reset() {
     particles.clear();
-    std::fill(cell_type.begin(), cell_type.end(), 0);
+    node_pool[0].clear();
+    node_pool[1].clear();
 
-    recursiveFree(root);
-    root = new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
-    initQuadtree(root, 3);
-    cacheLeaves(root);
-    cacheNeighbors(root);
-    findAllEdges();
-    QTu = QTu_new;
-    QTv = QTv_new;
+    root_list = 0;
+    allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
+    initQuadtree(3, root_list);
+}
+
+void QTSimulator::addWater(float x, float y, float radius) {
+    recursiveUpdatePhi(x, y, radius, root_list);
+    smoothing(root_list);
+    cacheLeaves(root_list);
+    cacheNeighbors(root_list);
+}
+void QTSimulator::delWater(float x, float y, float radius) {
+    // float r2 = radius * radius;
+    //
+    // auto new_end =
+    //     std::remove_if(particles.begin(), particles.end(), [&](auto &p) {
+    //         return ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y)) < r2;
+    //     });
+    //
+    // particles.erase(new_end, particles.end());
+    // markFluidCells();
+}
+
+void QTSimulator::recursiveGetLines(
+    std::vector<Line> &lines, int list_idx, int node_idx
+) const {
+    auto &node = getNode(list_idx, node_idx);
+    if (node.is_leaf) {
+        float x1 = node.x - node.size / 2.f;
+        float y1 = node.y - node.size / 2.f;
+        float x2 = node.x + node.size / 2.f;
+        float y2 = node.y + node.size / 2.f;
+
+        lines.push_back({x1, y1, x2, y1});
+        lines.push_back({x1, y1, x1, y2});
+        lines.push_back({x1, y2, x2, y2});
+        lines.push_back({x2, y1, x2, y2});
+        return;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        recursiveGetLines(lines, list_idx, node.children_idx[i]);
+    }
+}
+std::vector<Line> QTSimulator::getLines() const {
+    std::vector<Line> lines;
+
+    recursiveGetLines(lines, root_list);
+
+    return lines;
 }
 
 void QTSimulator::update(float dt) {
@@ -48,32 +91,36 @@ void QTSimulator::update(float dt) {
     commitQuadtreeS();
     propagateSizingFunction();
 
-    auto new_root =
-        new QuadtreeNode{(float)nx / 2, (float)ny / 2, (float)nx, 0};
-    recursiveBuildTree(new_root, dt);
+    int new_root_list = 1 - root_list;
+    node_pool[new_root_list].clear();
+    allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, new_root_list);
+    recursiveBuildTree(dt, new_root_list);
 
-    smoothing(new_root);
-    cacheLeaves(new_root);
-    cacheNeighbors(new_root);
+    smoothing(new_root_list);
+    cacheLeaves(new_root_list);
+    cacheNeighbors(new_root_list);
 
-    findAllEdges();
+    findAllEdges(new_root_list);
 
-    advectQuadtreeDatas(dt);
-    recursiveFree(root);
-    root = new_root;
+    advectQuadtreeDatas(dt, new_root_list);
+    root_list = new_root_list;
 
     QTu = QTu_new;
     QTv = QTv_new;
 
     particleToGrid();
-    // particleSurfaceToGrid();
+    particleSurfaceToGrid();
 
-    QTapplyGravity(dt);
     for (auto &face : QTu)
         face.val_old = face.val;
     for (auto &face : QTv)
         face.val_old = face.val;
+
+    QTapplyGravity(dt);
+
+    setBoundaries();
     QTproject();
+    setBoundaries();
 
     gridToParticle();
     advectParticles(dt);
@@ -84,24 +131,302 @@ void QTSimulator::update(float dt) {
     redistancing();
 }
 
-void QTSimulator::particleSurfaceToGrid() {
-    for (auto leaf : cached_leaves) {
-        if (leaf->size < 1.5f) {
-            auto nearest_p = nearestParticle(leaf->x, leaf->y, 2.f);
-            if (nearest_p.x != 1e6) {
-                float dist =
-                    std::sqrt(
-                        (nearest_p.x - leaf->x) * (nearest_p.x - leaf->x) +
-                        ((nearest_p.y - leaf->y) * (nearest_p.y - leaf->y))
-                    ) -
-                    particle_radius;
-                leaf->phi = std::min(leaf->phi, dist);
-            }
+void QTSimulator::setBoundaries() {
+    /*
+     * For all edges.
+     * Set the boundary to 0
+     */
+    for (int i = 0; i < QTu.size(); i++) {
+        if (QTu[i].solid_fraction >= 1.f) {
+            QTu[i].val = 0.0f;
+            QTu[i].val_old = 0.0f;
+        }
+    }
+
+    for (int i = 0; i < QTv.size(); i++) {
+        if (QTv[i].solid_fraction >= 1.f) {
+            QTv[i].val = 0.0f;
+            QTv[i].val_old = 0.0f;
         }
     }
 }
 
+void QTSimulator::computeSizingFunction(float dt) {
+    /*
+     * For all leaves.
+     * Compute the size function value
+     */
+
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        if (std::abs(leaf.phi) < leaf.size * 1.5f) {
+            float gamma_phi = 4.f;
+            float gamma_u = 3.f;
+
+            float T1 = 0.9, T2 = 0.01;
+            float R_t = std::pow(T1, dt / T2);
+
+            // // 0: left
+            // // 1: up
+            // // 2: right
+            // // 3: down
+            // NeighborData L = getNeighborData(leaf, 0);
+            // NeighborData U = getNeighborData(leaf, 1);
+            // NeighborData R = getNeighborData(leaf, 2);
+            // NeighborData D = getNeighborData(leaf, 3);
+            //
+            // float f_C = leaf.phi;
+            // float d2f_dx2 =
+            //     2.0f * (L.datas.phi / (L.distance * (L.distance +
+            //     R.distance)) -
+            //             f_C / (L.distance * R.distance) +
+            //             R.datas.phi / (R.distance * (L.distance +
+            //             R.distance)));
+            // float d2f_dy2 =
+            //     2.0f * (D.datas.phi / (D.distance * (D.distance +
+            //     U.distance)) -
+            //             f_C / (D.distance * U.distance) +
+            //             U.datas.phi / (U.distance * (D.distance +
+            //             U.distance)));
+            //
+            // float laplacian = std::abs(d2f_dx2 + d2f_dy2);
+            // float geom_term = gamma_phi * laplacian;
+            float geom_term = gamma_phi / (std::abs(leaf.phi) + 0.1f);
+
+            float ul = getVelocity(QTu, leaf.ul_id);
+            float ur = getVelocity(QTu, leaf.ur_id);
+            float vl = getVelocity(QTv, leaf.vl_id);
+            float vr = getVelocity(QTv, leaf.vr_id);
+
+            float du_dx = (ul - ur) / leaf.size;
+            float dv_dy = (vl - vr) / leaf.size;
+
+            float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
+
+            float S = geom_term + vel_term;
+
+            auto data = advect(leaf.x, leaf.y, dt);
+            float S_star = data.S;
+
+            leaf.S_new = std::max(R_t * S_star, S);
+        } else {
+            leaf.S_new = 0.0f;
+        }
+    }
+}
+
+void QTSimulator::propagateSizingFunction() {
+    /*
+     * For all leaves.
+     * propagate the size function value to around nodes
+     */
+
+    int iterations = 5;
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int leaf_idx : cached_leaves_idx) {
+            auto &leaf = getNode(root_list, leaf_idx);
+
+            float self_area = leaf.size * leaf.size;
+            leaf.S_new = leaf.S * self_area;
+
+            float total_area = self_area;
+            for (int i = 0; i < leaf.cached_neighbors_cnt; i++) {
+                int neighbor_idx = leaf.cached_neighbors_idx[i];
+                auto &neighbor = getNode(root_list, neighbor_idx);
+
+                float area = neighbor.size * neighbor.size;
+                leaf.S_new += std::max(neighbor.S, leaf.S) * area;
+                total_area += area;
+            }
+
+            leaf.S_new /= total_area;
+        }
+
+        for (auto leaf_idx : cached_leaves_idx) {
+            auto &leaf = getNode(root_list, leaf_idx);
+            leaf.S = leaf.S_new;
+        }
+    }
+}
+
+void QTSimulator::recursiveBuildTree(float dt, int list_idx, int node_idx) {
+    /*
+     * Recursive
+     * build the tree until size to 1.f
+     */
+
+    auto &node = getNode(list_idx, node_idx);
+    if (node.size < 1.5f)
+        return;
+
+    auto advected_data = advect(node.x, node.y, dt);
+    auto data = MLSinterpolate(node.x, node.y);
+
+    float exp_phi = advected_data.phi;
+    float exp_S = data.S;
+
+    if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
+        subdivideNode(list_idx, node_idx);
+
+        for (int i = 0; i < 4; i++) {
+            recursiveBuildTree(
+                dt, list_idx, getNode(list_idx, node_idx).children_idx[i]
+            );
+        }
+    }
+}
+
+void QTSimulator::findAllEdges(int list_idx) {
+    /*
+     * For all leaves.
+     * find all leaves' edge
+     */
+
+    QTu_new.clear();
+    QTv_new.clear();
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(list_idx, leaf_idx);
+
+        float half_size = leaf.size / 2.f;
+        float quad_size = leaf.size / 4.f;
+        float step = half_size + 0.1f;
+
+        int node_idx = 0;
+        auto &nodes = leaf.cached_neighbors_idx;
+        for (int dir = 0; dir < 4; dir++) {
+            int neighbot_cnt = leaf.neighbor_cnt[dir];
+
+            float x = leaf.x, y = leaf.y, solid_frac = 0;
+            int face_sgn;
+            std::vector<int> adj_cells_idx = {leaf_idx};
+            std::vector<float> coefs;
+            auto &first_neighbor = getNode(list_idx, nodes[node_idx]);
+
+            // up or down, need update y
+            if (dir & 1) {
+                y += (dir & 2 ? half_size : -half_size);
+            }
+            // left or right, need update x
+            else {
+                x += (dir & 2 ? half_size : -half_size);
+            }
+
+            if (dir == 0)
+                leaf.ul_id = QTu_new.size();
+            if (dir == 1)
+                leaf.vl_id = QTv_new.size();
+            if (dir == 2)
+                leaf.ur_id = QTu_new.size();
+            if (dir == 3)
+                leaf.vr_id = QTv_new.size();
+
+            if (dir <= 1) // left and up
+                face_sgn = -1;
+            else // right and down
+                face_sgn = 1;
+
+            if (neighbot_cnt == 0) {
+                coefs.assign({0});
+                solid_frac = 1;
+            } else if (neighbot_cnt == 2) {
+                adj_cells_idx.push_back(nodes[node_idx]);
+                adj_cells_idx.push_back(nodes[node_idx + 1]);
+
+                float coef = face_sgn * 1.f / (1.5f * first_neighbor.size);
+                coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
+            } else if (neighbot_cnt == 1) {
+                if (first_neighbor.depth == leaf.depth) {
+                    if (dir <= 1)
+                        goto OVERLAY_NODE;
+
+                    adj_cells_idx.push_back(nodes[node_idx]);
+                    float coef = face_sgn * 1.f / leaf.size;
+                    coefs.assign({-coef, coef});
+                    goto UPDATE;
+                }
+
+            OVERLAY_NODE:
+                switch (dir) {
+                case 0:
+                    leaf.ul_id = first_neighbor.ur_id;
+                    break;
+                case 1:
+                    leaf.vl_id = first_neighbor.vr_id;
+                    break;
+                case 2:
+                    leaf.ur_id = first_neighbor.ul_id;
+                    break;
+                case 3:
+                    leaf.vr_id = first_neighbor.vl_id;
+                    break;
+                }
+                node_idx += neighbot_cnt;
+                continue;
+            } else {
+                std::cout << "Some ERROR appear" << std::endl;
+                continue;
+            }
+
+        UPDATE:
+            // up or down, push into v
+            if (dir & 1)
+                QTv_new.push_back({
+                    x,
+                    y,
+                    leaf.size,
+                    0,
+                    solid_frac,
+                    adj_cells_idx,
+                    coefs,
+                });
+            // left or right, push into u
+            else
+                QTu_new.push_back({
+                    x,
+                    y,
+                    leaf.size,
+                    0,
+                    solid_frac,
+                    adj_cells_idx,
+                    coefs,
+                });
+
+            node_idx += neighbot_cnt;
+        }
+    }
+}
+
+void QTSimulator::advectQuadtreeDatas(float dt, int list_idx) {
+    /*
+     * For all leaves.
+     * For all edges.
+     * advect the Phi, Size function and velocity data
+     */
+
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(list_idx, leaf_idx);
+        auto advected_leaf = advect(leaf.x, leaf.y, dt);
+        leaf.phi = advected_leaf.phi;
+        leaf.S = advected_leaf.S;
+        leaf.pressure = advected_leaf.pressure;
+    }
+
+    for (auto &face : QTu_new) {
+        auto advected_face = advect(face.x, face.y, dt);
+        face.val = advected_face.u;
+    }
+    for (auto &face : QTv_new) {
+        auto advected_face = advect(face.x, face.y, dt);
+        face.val = advected_face.v;
+    }
+}
+
 void QTSimulator::particleToGrid() {
+    /*
+     * For all edges.
+     * get velocity data from particles
+     */
+
     float search_radius = 1.5f;
     float weight_eps = 1e-6;
 
@@ -153,89 +478,71 @@ void QTSimulator::particleToGrid() {
         updateFace(QTv[i], false);
 }
 
-void QTSimulator::updateParticleIdx() {
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            particle_idx[IX(i, j)].clear();
+void QTSimulator::particleSurfaceToGrid() {
+    /*
+     * For all leaves.
+     * reconstruct the surface by particles
+     */
+
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        if (leaf.size < 1.5f && leaf.phi < leaf.size) {
+            auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
+            if (nearest_p.x != 1e6) {
+                float dist = std::sqrt(
+                    (nearest_p.x - leaf.x) * (nearest_p.x - leaf.x) +
+                    ((nearest_p.y - leaf.y) * (nearest_p.y - leaf.y))
+                );
+
+                // if (dist < 0.f)
+                leaf.phi = std::min(leaf.phi, dist);
+            }
         }
     }
-    for (int i = 0; i < particles.size(); i++) {
-        auto &p = particles[i];
-        int ix = p.x;
-        int iy = p.y;
+}
 
-        ix = std::clamp(ix, 0, nx - 1);
-        iy = std::clamp(iy, 0, ny - 1);
+void QTSimulator::QTapplyGravity(float dt) {
+    /*
+     * For all edges.
+     * add gravity on horizontial edges
+     */
 
-        particle_idx[IX(ix, iy)].push_back(i);
+    for (auto &face : QTv) {
+        bool is_water = false;
+        for (int node_idx : face.adj_cells_idx)
+            is_water |= (getNode(root_list, node_idx).phi < 0.0f);
+
+        if (is_water)
+            face.val += G * dt;
     }
 }
 
-void QTSimulator::addWater(float x, float y, float radius) {
-    recursiveUpdatePhi(root, x, y, radius);
-    smoothing(root);
-    cacheLeaves(root);
-    cacheNeighbors(root);
-}
-void QTSimulator::delWater(float x, float y, float radius) {
-    // float r2 = radius * radius;
-    //
-    // auto new_end =
-    //     std::remove_if(particles.begin(), particles.end(), [&](auto &p) {
-    //         return ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y)) < r2;
-    //     });
-    //
-    // particles.erase(new_end, particles.end());
-    // markFluidCells();
-}
-
-void QTSimulator::recursiveGetLines(
-    QuadtreeNode *node, std::vector<Line> &lines
-) const {
-    float x1 = node->x - node->size / 2.f;
-    float y1 = node->y - node->size / 2.f;
-    float x2 = node->x + node->size / 2.f;
-    float y2 = node->y + node->size / 2.f;
-
-    lines.push_back({x1, y1, x2, y1});
-    lines.push_back({x1, y1, x1, y2});
-    lines.push_back({x1, y2, x2, y2});
-    lines.push_back({x2, y1, x2, y2});
-
-    if (node->is_leaf)
-        return;
-
-    for (int i = 0; i < 4; i++) {
-        recursiveGetLines(node->children[i], lines);
-    }
-}
-std::vector<Line> QTSimulator::getLines() const {
-    std::vector<Line> lines;
-
-    recursiveGetLines(root, lines);
-
-    return lines;
-}
-
-float compute_Wk(QuadtreeEdge &face) {
-    float total = 0, liquid = 0;
-    for (int i = 0; i < face.adj_cells.size(); i++) {
-        total += face.grad_coeff[i] * face.adj_cells[i]->phi;
-        if (face.adj_cells[i]->phi <= 0.f)
-            liquid += face.grad_coeff[i] * face.adj_cells[i]->phi;
-    }
-    if (std::abs(liquid) < 1e-6f)
-        return 1.f;
-    return total / liquid;
-}
 void QTSimulator::QTproject() {
+    /*
+     * For all edges.
+     * compute pressure and update velocity
+     */
+
+    auto compute_Wk = [&](QuadtreeEdge &face) {
+        float total = 0, liquid = 0;
+        for (int i = 0; i < face.adj_cells_idx.size(); i++) {
+            auto &cell = getNode(root_list, face.adj_cells_idx[i]);
+            total += face.grad_coeff[i] * cell.phi;
+            if (cell.phi <= 0.f)
+                liquid += face.grad_coeff[i] * cell.phi;
+        }
+        if (std::abs(liquid) < 1e-6f)
+            return 1.f;
+        return total / liquid;
+    };
 
     int fluid_count = 0;
-    for (auto leaf : cached_leaves) {
-        if (leaf->phi <= 0.0)
-            leaf->fluid_id = fluid_count++;
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        if (leaf.phi <= 0.0)
+            leaf.fluid_id = fluid_count++;
         else
-            leaf->fluid_id = -1;
+            leaf.fluid_id = -1;
     }
 
     if (fluid_count == 0)
@@ -250,8 +557,8 @@ void QTSimulator::QTproject() {
         float VA = face.length * (1.f - face.solid_fraction);
 
         bool has_fluid = false;
-        for (auto cell : face.adj_cells)
-            has_fluid |= (cell->fluid_id != -1);
+        for (int cell_idx : face.adj_cells_idx)
+            has_fluid |= (getNode(root_list, cell_idx).fluid_id != -1);
         if (!has_fluid)
             return;
 
@@ -259,19 +566,19 @@ void QTSimulator::QTproject() {
         float W_prime = std::max(W_k, 0.01f);
         float face_weight = VA * W_prime;
 
-        for (int i = 0; i < face.adj_cells.size(); i++) {
-            auto cell_i = face.adj_cells[i];
-            if (cell_i->fluid_id == -1)
+        for (int i = 0; i < face.adj_cells_idx.size(); i++) {
+            auto &cell_i = getNode(root_list, face.adj_cells_idx[i]);
+            if (cell_i.fluid_id == -1)
                 continue;
-            int row = cell_i->fluid_id;
+            int row = cell_i.fluid_id;
 
             div[row] += VA * u_star * face.grad_coeff[i];
 
-            for (int j = 0; j < face.adj_cells.size(); j++) {
-                auto cell_j = face.adj_cells[j];
-                if (cell_j->fluid_id == -1)
+            for (int j = 0; j < face.adj_cells_idx.size(); j++) {
+                auto &cell_j = getNode(root_list, face.adj_cells_idx[j]);
+                if (cell_j.fluid_id == -1)
                     continue;
-                int col = cell_j->fluid_id;
+                int col = cell_j.fluid_id;
 
                 float val =
                     face_weight * face.grad_coeff[i] * face.grad_coeff[j];
@@ -292,17 +599,17 @@ void QTSimulator::QTproject() {
 
     auto updateFace = [&](QuadtreeEdge &face) {
         bool has_fluid = false;
-        for (auto cell : face.adj_cells)
-            has_fluid |= (cell->fluid_id != -1);
+        for (int cell_idx : face.adj_cells_idx)
+            has_fluid |= (getNode(root_list, cell_idx).fluid_id != -1);
         if (!has_fluid)
             return;
 
         float grad_p = 0;
 
-        for (int i = 0; i < face.adj_cells.size(); i++) {
-            auto cell = face.adj_cells[i];
+        for (int i = 0; i < face.adj_cells_idx.size(); i++) {
+            auto &cell = getNode(root_list, face.adj_cells_idx[i]);
             float p_val =
-                (cell->fluid_id != -1 ? pressure[cell->fluid_id] : 0.0f);
+                (cell.fluid_id != -1 ? pressure[cell.fluid_id] : 0.0f);
             grad_p += face.grad_coeff[i] * p_val;
         }
 
@@ -316,282 +623,14 @@ void QTSimulator::QTproject() {
         updateFace(face);
 }
 
-void QTSimulator::advectParticles(float dt) {
-    for (auto &p : particles) {
-        auto d1 = MLSinterpolate(p.x, p.y);
-        float mid_x = p.x + d1.u * dt * 0.5f;
-        float mid_y = p.y + d1.v * dt * 0.5f;
-
-        auto d2 = MLSinterpolate(mid_x, mid_y);
-        p.x += d2.u * dt;
-        p.y += d2.v * dt;
-
-        float eps = 1e-3;
-        p.x = std::clamp(p.x, eps, (float)nx - eps);
-        p.y = std::clamp(p.y, eps, (float)ny - eps);
-    }
-}
-
-void QTSimulator::QTapplyGravity(float dt) {
-    for (auto &face : QTv) {
-        bool is_water = false;
-        for (auto node : face.adj_cells)
-            is_water |= (node->phi < 0.0f);
-
-        if (is_water)
-            face.val += G * dt;
-    }
-}
-
-float QTSimulator::bilerp(
-    const std::vector<float> &field, int w, int h, float x, float y
-) const {
-    x = std::max(0.0f, std::min((float)w - 1.001f, x));
-    y = std::max(0.0f, std::min((float)h - 1.001f, y));
-
-    int i = (int)x;
-    int j = (int)y;
-    float fx = x - i;
-    float fy = y - j;
-
-    float c00 = field[i + j * w];
-    float c10 = field[(i + 1) + j * w];
-    float c01 = field[i + (j + 1) * w];
-    float c11 = field[(i + 1) + (j + 1) * w];
-
-    return (c00 * (1 - fx) + c10 * fx) * (1 - fy) +
-           (c01 * (1 - fx) + c11 * fx) * fy;
-}
-
-void QTSimulator::bidistri(
-    std::vector<float> &field, int w, int h, float x, float y, float value
-) {
-    x = std::max(0.0f, std::min((float)w - 1.001f, x));
-    y = std::max(0.0f, std::min((float)h - 1.001f, y));
-
-    int i = (int)x;
-    int j = (int)y;
-    float fx = x - i;
-    float fy = y - j;
-
-    float c0 = value * (1 - fx);
-    float c1 = value * fx;
-
-    float c00 = c0 * (1 - fy);
-    float c01 = c0 * fy;
-    float c10 = c1 * (1 - fy);
-    float c11 = c1 * fy;
-
-    field[i + j * w] += c00;
-    field[(i + 1) + j * w] += c10;
-    field[i + (j + 1) * w] += c01;
-    field[(i + 1) + (j + 1) * w] += c11;
-}
-
-// Quad Tree
-void QTSimulator::initQuadtree(QuadtreeNode *node, int max_depth) {
-    if (node->depth >= max_depth)
-        return;
-
-    subdivideNode(node);
-    for (int i = 0; i < 4; i++) {
-        initQuadtree(node->children[i], max_depth);
-    }
-}
-
-// NeighborData QTSimulator::getNeighborData(QuadtreeNode *node, int direction)
-// {
-//     // 0: left
-//     // 1: up
-//     // 2: right
-//     // 3: down
-//
-//     NeighborData data;
-//     float h_C = node->size;
-//
-//     std::vector<std::pair<int, QuadtreeNode *>> neighbors;
-//     getNeighbors(node, neighbors);
-//     std::vector<QuadtreeNode *> tmp;
-//
-//     for (auto [dir, node] : neighbors)
-//         if (dir == direction)
-//             tmp.push_back(node);
-//
-//     if (tmp.empty()) {
-//         data.datas = InterpolatedData(node);
-//         data.distance = h_C;
-//         return data;
-//     }
-//
-//     if (tmp.size() == 1) {
-//         // 情況 1 & 2：只有一個鄰居 (等大或較大)
-//         QuadtreeNode *nb = tmp[0];
-//         float h_nb = nb->size;
-//
-//         data.datas = InterpolatedData(nb);
-//         data.distance = (h_C + h_nb) * 0.5f; // 中心點距離公式: (h_C + h_nb)
-//         / 2
-//     } else if (tmp.size() == 2) {
-//         // 情況 3：T-junction，有兩個較小的鄰居
-//         auto f0 = InterpolatedData(tmp[0]);
-//         auto f1 = InterpolatedData(tmp[1]);
-//
-//         data.datas = (f0 + f1) * 0.5f;             // 數值取平均
-//         data.distance = (h_C + h_C * 0.5f) * 0.5f; // 距離為 0.75 * h_C
-//     }
-//
-//     return data;
-// }
-
-void QTSimulator::computeSizingFunction(float dt) {
-
-    for (auto leaf : cached_leaves) {
-        if (std::abs(leaf->phi) < leaf->size * 1.5f) {
-            float gamma_phi = 4.f;
-            float gamma_u = 3.f;
-
-            float T1 = 0.9, T2 = 0.01;
-            float R_t = std::pow(T1, dt / T2);
-
-            // // 0: left
-            // // 1: up
-            // // 2: right
-            // // 3: down
-            // NeighborData L = getNeighborData(leaf, 0);
-            // NeighborData U = getNeighborData(leaf, 1);
-            // NeighborData R = getNeighborData(leaf, 2);
-            // NeighborData D = getNeighborData(leaf, 3);
-            //
-            // float f_C = leaf->phi;
-            // float d2f_dx2 =
-            //     2.0f * (L.datas.phi / (L.distance * (L.distance +
-            //     R.distance)) -
-            //             f_C / (L.distance * R.distance) +
-            //             R.datas.phi / (R.distance * (L.distance +
-            //             R.distance)));
-            // float d2f_dy2 =
-            //     2.0f * (D.datas.phi / (D.distance * (D.distance +
-            //     U.distance)) -
-            //             f_C / (D.distance * U.distance) +
-            //             U.datas.phi / (U.distance * (D.distance +
-            //             U.distance)));
-            //
-            // float laplacian = std::abs(d2f_dx2 + d2f_dy2);
-            // float geom_term = gamma_phi * laplacian;
-            float geom_term = gamma_phi / (std::abs(leaf->phi) + 0.1f);
-
-            float ul = getVelocity(QTu, leaf->ul_id);
-            float ur = getVelocity(QTu, leaf->ur_id);
-            float vl = getVelocity(QTv, leaf->vl_id);
-            float vr = getVelocity(QTv, leaf->vr_id);
-
-            float du_dx = (ul - ur) / leaf->size;
-            float dv_dy = (vl - vr) / leaf->size;
-
-            float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
-
-            float S = geom_term + vel_term;
-
-            auto data = advect(leaf->x, leaf->y, dt);
-            float S_star = data.S;
-
-            leaf->S_new = std::max(R_t * S_star, S);
-        } else {
-            leaf->S_new = 0.0f;
-        }
-    }
-}
-
-void QTSimulator::commitQuadtreeS() {
-    for (auto leaf : cached_leaves) {
-        leaf->S = leaf->S_new;
-    }
-}
-
-void QTSimulator::commitQuadtreePhi() {
-    for (auto leaf : cached_leaves) {
-        leaf->phi = leaf->phi_new;
-    }
-}
-
-void QTSimulator::propagateSizingFunction() {
-    int iterations = 5;
-    for (int iter = 0; iter < iterations; iter++) {
-        for (int i = 0; i < cached_leaves.size(); i++) {
-            auto node = cached_leaves[i];
-
-            float self_area = node->size * node->size;
-            node->S_new = node->S * self_area;
-
-            float total_area = self_area;
-            for (auto n : node->cached_neighbors) {
-
-                float area = n->size * n->size;
-                node->S_new += std::max(n->S, node->S) * area;
-                total_area += area;
-            }
-
-            node->S_new /= total_area;
-        }
-
-        for (int i = 0; i < cached_leaves.size(); i++)
-            cached_leaves[i]->S = cached_leaves[i]->S_new;
-    }
-}
-void QTSimulator::recursiveBuildTree(QuadtreeNode *node, float dt) {
-    if (node->size < 1.5f)
-        return;
-
-    auto advected_data = advect(node->x, node->y, dt);
-    auto data = MLSinterpolate(node->x, node->y);
-
-    float exp_phi = advected_data.phi;
-    float exp_S = data.S;
-
-    if (std::abs(exp_phi) < node->size && exp_S > (1.f / node->size)) {
-        subdivideNode(node);
-
-        for (int i = 0; i < 4; i++) {
-            recursiveBuildTree(node->children[i], dt);
-        }
-    }
-}
-
-InterpolatedData QTSimulator::advect(float x, float y, float dt) {
-    auto current_data = MLSinterpolate(x, y);
-    // float u_val = bilerp(u, nx + 1, ny, x, y);
-    // float v_val = bilerp(v, nx, ny + 1, x, y);
-    float u_val = current_data.u;
-    float v_val = current_data.v;
-
-    float past_x = std::clamp(x - u_val * dt, 0.0f, (float)nx);
-    float past_y = std::clamp(y - v_val * dt, 0.0f, (float)ny);
-
-    return MLSinterpolate(past_x, past_y);
-}
-
-void QTSimulator::advectQuadtreeDatas(float dt) {
-
-    for (auto leaf : cached_leaves) {
-        auto advected_leaf = advect(leaf->x, leaf->y, dt);
-        leaf->phi = advected_leaf.phi;
-        leaf->S = advected_leaf.S;
-        leaf->pressure = advected_leaf.pressure;
-    }
-
-    for (auto &face : QTu_new) {
-        auto advected_face = advect(face.x, face.y, dt);
-        face.val = advected_face.u;
-    }
-    for (auto &face : QTv_new) {
-        auto advected_face = advect(face.x, face.y, dt);
-        face.val = advected_face.v;
-    }
-}
 void QTSimulator::gridToParticle() {
+    /*
+     * For all particles
+     * get velocity from edges
+     */
+
     float flipRatio = 0.95f;
 
-#pragma omp parallel for
     for (auto &p : particles) {
         auto data = MLSinterpolate(p.x, p.y);
         float u_new_grid = data.u;
@@ -610,73 +649,131 @@ void QTSimulator::gridToParticle() {
         p.v = flipRatio * v_flip + (1.f - flipRatio) * v_pic;
     }
 }
+
+void QTSimulator::advectParticles(float dt) {
+    /*
+     * For all particles
+     * advect the velocity
+     */
+
+    for (auto &p : particles) {
+        auto d1 = MLSinterpolate(p.x, p.y);
+        float mid_x = p.x + d1.u * dt * 0.5f;
+        float mid_y = p.y + d1.v * dt * 0.5f;
+
+        auto d2 = MLSinterpolate(mid_x, mid_y);
+        p.x += d2.u * dt;
+        p.y += d2.v * dt;
+
+        float eps = 1e-3;
+        p.x = std::clamp(p.x, eps, (float)nx - eps);
+        p.y = std::clamp(p.y, eps, (float)ny - eps);
+    }
+}
+
 void QTSimulator::resampleParticles() {
+    /*
+     * For all leaves.
+     * resample particles
+     */
+
     auto new_end =
         std::remove_if(particles.begin(), particles.end(), [&](const auto &p) {
-            QuadtreeNode *node = getNodeAt(root, p.x, p.y);
+            int node_idx = getNodeIdxAt(p.x, p.y, root_list);
 
-            if (!node)
+            if (node_idx == -1)
                 return true;
 
-            if (node->size > 1.5f)
+            auto &node = getNode(root_list, node_idx);
+            if (node.size > 1.5f)
                 return true;
 
-            if (node->phi < -3.f * node->size)
+            if (node.phi < -3.f * node.size)
                 return true;
 
-            node->has_particle = true;
+            node.has_particle = true;
             return false;
         });
     particles.erase(new_end, particles.end());
 
-    for (auto leaf : cached_leaves) {
-        if (leaf->phi < 0 &&
-            leaf->size < 1.5f &&
-            leaf->phi > -leaf->size &&
-            !leaf->has_particle) {
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        if (leaf.phi < 0 &&
+            leaf.size < 1.5f &&
+            leaf.phi > -leaf.size &&
+            !leaf.has_particle) {
 
-            float px =
-                leaf->x + (((rand() % 100) / 100.0f) - 0.5f) * leaf->size;
-            float py =
-                leaf->y + (((rand() % 100) / 100.0f) - 0.5f) * leaf->size;
+            float px = leaf.x + (((rand() % 100) / 100.0f) - 0.5f) * leaf.size;
+            float py = leaf.y + (((rand() % 100) / 100.0f) - 0.5f) * leaf.size;
             auto data = MLSinterpolate(px, py);
             particles.push_back({px, py, data.u, data.v});
         }
     }
 }
 
+void QTSimulator::updateParticleIdx() {
+    /*
+     * For all particles
+     * update grid hash data
+     */
+
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            particle_idx[IX(i, j)].clear();
+        }
+    }
+    for (int i = 0; i < particles.size(); i++) {
+        auto &p = particles[i];
+        int ix = p.x;
+        int iy = p.y;
+
+        ix = std::clamp(ix, 0, nx - 1);
+        iy = std::clamp(iy, 0, ny - 1);
+
+        particle_idx[IX(ix, iy)].push_back(i);
+    }
+}
+
 void QTSimulator::redistancing() {
-    std::priority_queue<
-        QuadtreeNode *,
-        std::vector<QuadtreeNode *>,
-        QTNSurfaceFirst>
-        pq;
+    /*
+     * For all leaves.
+     * recompute the phi by particles
+     */
 
-    for (auto leaf : cached_leaves) {
-        // if (std::abs(leaf->phi) < 0.5) {
-        //     leaf->phi_new = leaf->phi;
-        if (std::abs(leaf->phi) < leaf->size * 1.5f) {
+    auto surfaceFirst = [&](int a_idx, int b_idx) {
+        return std::abs(getNode(root_list, a_idx).phi_new) >
+               std::abs(getNode(root_list, b_idx).phi_new);
+    };
+    std::priority_queue<int, std::vector<int>, decltype(surfaceFirst)> pq(
+        surfaceFirst
+    );
 
-            if (leaf->size < 1.5f) {
-                auto nearest_p = nearestParticle(leaf->x, leaf->y, 2.f);
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        // if (std::abs(leaf.phi) < 0.5) {
+        //     leaf.phi_new = leaf.phi;
+        if (std::abs(leaf.phi) < leaf.size * 1.5f) {
+
+            if (leaf.size < 1.5f) {
+                auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
 
                 if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-                    leaf->phi_new = std::numeric_limits<float>::infinity();
+                    leaf.phi_new = std::numeric_limits<float>::infinity();
                     continue;
                 }
 
                 float dist = std::sqrt(
-                    (leaf->x - nearest_p.x) * (leaf->x - nearest_p.x) +
-                    (leaf->y - nearest_p.y) * (leaf->y - nearest_p.y)
+                    (leaf.x - nearest_p.x) * (leaf.x - nearest_p.x) +
+                    (leaf.y - nearest_p.y) * (leaf.y - nearest_p.y)
                 );
                 dist -= particle_radius;
 
-                leaf->phi = std::min(leaf->phi, dist);
+                leaf.phi = std::min(leaf.phi, dist);
             }
-            leaf->phi_new = leaf->phi;
-            pq.push(leaf);
+            leaf.phi_new = leaf.phi;
+            pq.push(leaf_idx);
         } else {
-            leaf->phi_new = std::numeric_limits<float>::infinity();
+            leaf.phi_new = std::numeric_limits<float>::infinity();
         }
     }
 
@@ -685,30 +782,326 @@ void QTSimulator::redistancing() {
     }
 
     while (!pq.empty()) {
-        auto curr_node = pq.top();
+        int curr_node_idx = pq.top();
+        auto &curr_node = getNode(root_list, curr_node_idx);
         pq.pop();
 
-        if (curr_node->known)
+        if (curr_node.known)
             continue;
-        curr_node->known = true;
+        curr_node.known = true;
 
-        for (auto neighbor : curr_node->cached_neighbors) {
+        for (int i = 0; i < curr_node.cached_neighbors_cnt; i++) {
+            int neighbor_idx = curr_node.cached_neighbors_idx[i];
+            auto &neighbor = getNode(root_list, neighbor_idx);
             float dist = std::sqrt(
-                pow(curr_node->x - neighbor->x, 2) +
-                pow(curr_node->y - neighbor->y, 2)
+                pow(curr_node.x - neighbor.x, 2) +
+                pow(curr_node.y - neighbor.y, 2)
             );
 
-            dist = neighbor->phi < 0 ? -dist : dist;
+            dist = neighbor.phi < 0 ? -dist : dist;
 
-            float proposed_phi_new = curr_node->phi_new + dist;
+            float proposed_phi_new = curr_node.phi_new + dist;
 
-            if (std::abs(proposed_phi_new) < std::abs(neighbor->phi_new)) {
-                neighbor->phi_new = proposed_phi_new;
-                pq.push(neighbor);
+            if (std::abs(proposed_phi_new) < std::abs(neighbor.phi_new)) {
+                neighbor.phi_new = proposed_phi_new;
+                pq.push(neighbor_idx);
             }
         }
     }
     commitQuadtreePhi();
+}
+
+// Quad Tree Build Functions
+void QTSimulator::initQuadtree(int max_depth, int list_idx, int node_idx) {
+    if (node_pool[list_idx][node_idx].depth >= max_depth)
+        return;
+
+    subdivideNode(list_idx, node_idx);
+    for (int i = 0; i < 4; i++) {
+        initQuadtree(
+            max_depth, list_idx, node_pool[list_idx][node_idx].children_idx[i]
+        );
+    }
+}
+
+void QTSimulator::subdivideNode(int list_idx, int node_idx) {
+
+    auto &pool = node_pool[list_idx];
+    pool.reserve(pool.size() + 4);
+
+    auto &node = pool[node_idx];
+    node.is_leaf = false;
+
+    float child_size = node.size / 2.f;
+    for (int i = 0; i < 4; i++) {
+        float x = node.x + (i & 1 ? 1.f : -1.f) * child_size / 2.f;
+        float y = node.y + (i & 2 ? 1.f : -1.f) * child_size / 2.f;
+        node.children_idx[i] =
+            allocate(x, y, child_size, node.depth + 1, list_idx);
+
+        auto &child = getNode(list_idx, node.children_idx[i]);
+        child.ul_id = node.ul_id;
+        child.ur_id = node.ur_id;
+        child.vl_id = node.vl_id;
+        child.vr_id = node.vr_id;
+    }
+}
+
+void QTSimulator::smoothing(int list_idx) {
+
+    std::vector<int> leaves;
+    collectLeafNodes(leaves, list_idx);
+
+    auto surfaceFirst = [&](int a_idx, int b_idx) {
+        return std::abs(getNode(list_idx, a_idx).depth) <
+               std::abs(getNode(list_idx, b_idx).depth);
+    };
+    std::priority_queue<int, std::vector<int>, decltype(surfaceFirst)> pq(
+        surfaceFirst, std::move(leaves)
+    );
+
+    while (!pq.empty()) {
+        int node_idx = pq.top();
+        pq.pop();
+
+        float node_x, node_y, node_size;
+        int node_depth;
+        bool node_is_leaf;
+        {
+            auto &node = getNode(list_idx, node_idx);
+            node_x = node.x;
+            node_y = node.y;
+            node_size = node.size;
+            node_depth = node.depth;
+            node_is_leaf = node.is_leaf;
+        }
+
+        if (!node_is_leaf)
+            continue;
+
+        float step = node_size / 2.f + 0.1f;
+        int direction[5] = {1, 0, -1, 0, 1};
+        for (int i = 0; i < 4; i++) {
+            float dx = direction[i] * step;
+            float dy = direction[i + 1] * step;
+
+            float x = node_x + dx;
+            float y = node_y + dy;
+
+            if (x < 0 || x > nx || y < 0 || y > ny)
+                continue;
+
+            int neighbor_idx = getNodeIdxAt(x, y, list_idx);
+            if (neighbor_idx == -1)
+                continue;
+
+            if (node_depth - getNode(list_idx, neighbor_idx).depth > 1) {
+                subdivideNode(list_idx, neighbor_idx);
+                for (int c = 0; c < 4; c++) {
+                    auto &neighbor = getNode(list_idx, neighbor_idx);
+                    auto &child = getNode(list_idx, neighbor.children_idx[c]);
+                    child.phi = neighbor.phi;
+                    pq.push(neighbor.children_idx[c]);
+                }
+            }
+        }
+    }
+}
+
+void QTSimulator::recursiveUpdatePhi(
+    float cx, float cy, float radius, int list_idx, int node_idx
+) {
+
+    float node_x, node_y;
+    float new_phi, node_phi, node_size;
+    bool node_is_leaf;
+    {
+        auto &node = getNode(list_idx, node_idx);
+        new_phi = circleSDF(cx, cy, radius, node.x, node.y);
+        node.phi = std::min(node.phi, new_phi);
+
+        node_x = node.x;
+        node_y = node.y;
+        node_size = node.size;
+        node_phi = node.phi;
+        node_is_leaf = node.is_leaf;
+    }
+
+    if (!node_is_leaf) {
+        for (int i = 0; i < 4; i++)
+            recursiveUpdatePhi(
+                cx,
+                cy,
+                radius,
+                list_idx,
+                getNode(list_idx, node_idx).children_idx[i]
+            );
+        return;
+    }
+
+    if (node_size >= 1.5f && std::abs(new_phi) < node_size) {
+        subdivideNode(list_idx, node_idx);
+        for (int i = 0; i < 4; i++)
+            recursiveUpdatePhi(
+                cx,
+                cy,
+                radius,
+                list_idx,
+                getNode(list_idx, node_idx).children_idx[i]
+            );
+    }
+    if (node_size < 1.5f && node_phi < 0) {
+        particles.push_back({node_x, node_y});
+    }
+}
+
+void QTSimulator::collectLeafNodes(
+    std::vector<int> &leaves_idx, int list_idx, int node_idx
+) const {
+    auto &node = getNode(list_idx, node_idx);
+    if (node.is_leaf) {
+        leaves_idx.push_back(node_idx);
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        collectLeafNodes(leaves_idx, list_idx, node.children_idx[i]);
+    }
+}
+
+void QTSimulator::cacheLeaves(int list_idx) {
+    cached_leaves_idx.clear();
+    collectLeafNodes(cached_leaves_idx, list_idx);
+
+    sort(
+        cached_leaves_idx.begin(),
+        cached_leaves_idx.end(),
+        [&](int a_idx, int b_idx) {
+            auto &a = getNode(list_idx, a_idx);
+            auto &b = getNode(list_idx, b_idx);
+            if (a.depth != b.depth)
+                return a.depth < b.depth;
+            if (a.x != b.x)
+                return a.x < b.x;
+            return a.y < b.y;
+        }
+    );
+}
+
+void QTSimulator::cacheNeighbors(int list_idx) {
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(list_idx, leaf_idx);
+
+        std::vector<std::pair<int, int>> neighbors_idx;
+        getNeighbors(neighbors_idx, list_idx, leaf_idx);
+
+        for (auto [dir, node_idx] : neighbors_idx) {
+            leaf.cached_neighbors_idx[leaf.cached_neighbors_cnt++] = node_idx;
+            leaf.neighbor_cnt[dir]++;
+        }
+    }
+}
+
+void QTSimulator::getNeighbors(
+    std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
+) {
+    // 0: left
+    // 1: up
+    // 2: right
+    // 3: down
+
+    auto &node = getNode(list_idx, node_idx);
+
+    float hs = node.size / 2.f;
+    float qs = node.size / 4.f;
+
+    float eps = 0.1;
+
+    std::vector<std::pair<float, float>> sample_points = {
+        // left
+        {node.x - hs - eps, node.y + qs},
+        {node.x - hs - eps, node.y - qs},
+
+        // up
+        {node.x + qs, node.y - hs - eps},
+        {node.x - qs, node.y - hs - eps},
+
+        // right
+        {node.x + hs + eps, node.y + qs},
+        {node.x + hs + eps, node.y - qs},
+
+        // down
+        {node.x + qs, node.y + hs + eps},
+        {node.x - qs, node.y + hs + eps},
+    };
+
+    for (int i = 0; i < 8; i++) {
+        auto [qx, qy] = sample_points[i];
+        if (qx < 0.0f || qx >= (float)nx || qy < 0.0f || qy >= (float)ny) {
+            continue;
+        }
+
+        int neighbor_idx = getNodeIdxAt(qx, qy, list_idx);
+
+        if (neighbor_idx != -1 && neighbor_idx != node_idx) {
+            neighbors.push_back({i / 2, neighbor_idx});
+        }
+    }
+
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(
+        std::unique(neighbors.begin(), neighbors.end()), neighbors.end()
+    );
+}
+
+int QTSimulator::getNodeIdxAt(
+    float x, float y, int list_idx, int node_idx
+) const {
+    if (x < 0 || x > nx || y < 0 || y > ny)
+        return -1;
+
+    auto &node = getNode(list_idx, node_idx);
+    if (node.is_leaf)
+        return node_idx;
+
+    int child_idx = 0;
+    if (x > node.x)
+        child_idx |= 1;
+    if (y > node.y)
+        child_idx |= 2;
+    return getNodeIdxAt(x, y, list_idx, node.children_idx[child_idx]);
+}
+
+void QTSimulator::commitQuadtreeS() {
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        leaf.S = leaf.S_new;
+    }
+}
+
+void QTSimulator::commitQuadtreePhi() {
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        leaf.phi = leaf.phi_new;
+    }
+}
+
+InterpolatedData QTSimulator::advect(float x, float y, float dt) {
+    auto current_data = MLSinterpolate(x, y);
+    // float u_val = bilerp(u, nx + 1, ny, x, y);
+    // float v_val = bilerp(v, nx, ny + 1, x, y);
+    float u_val = current_data.u;
+    float v_val = current_data.v;
+
+    float past_x = std::clamp(x - u_val * dt, 0.0f, (float)nx);
+    float past_y = std::clamp(y - v_val * dt, 0.0f, (float)ny);
+
+    return MLSinterpolate(past_x, past_y);
+}
+
+float QTSimulator::getVelocity(std::vector<QuadtreeEdge> &field, int id) {
+    if (id == -1)
+        return 0.0f;
+    return field[id].val;
 }
 
 Particle QTSimulator::nearestParticle(float x, float y, float radius) {
@@ -736,208 +1129,6 @@ Particle QTSimulator::nearestParticle(float x, float y, float radius) {
         }
     }
     return result;
-}
-
-void QTSimulator::getNeighbors(
-    QuadtreeNode *new_root,
-    QuadtreeNode *node,
-    std::vector<std::pair<int, QuadtreeNode *>> &neighbors
-) {
-    // 0: left
-    // 1: up
-    // 2: right
-    // 3: down
-
-    if (!node)
-        return;
-
-    float hs = node->size / 2.f;
-    float qs = node->size / 4.f;
-
-    float eps = 0.1;
-
-    std::vector<std::pair<float, float>> sample_points = {
-        // left
-        {node->x - hs - eps, node->y + qs},
-        {node->x - hs - eps, node->y - qs},
-
-        // up
-        {node->x + qs, node->y - hs - eps},
-        {node->x - qs, node->y - hs - eps},
-
-        // right
-        {node->x + hs + eps, node->y + qs},
-        {node->x + hs + eps, node->y - qs},
-
-        // down
-        {node->x + qs, node->y + hs + eps},
-        {node->x - qs, node->y + hs + eps},
-    };
-
-    for (int i = 0; i < 8; i++) {
-        auto [qx, qy] = sample_points[i];
-        if (qx < 0.0f || qx >= (float)nx || qy < 0.0f || qy >= (float)ny) {
-            continue;
-        }
-
-        QuadtreeNode *neighbor = getNodeAt(new_root, qx, qy);
-
-        if (neighbor && neighbor != node) {
-            neighbors.push_back({i / 2, neighbor});
-        }
-    }
-
-    std::sort(neighbors.begin(), neighbors.end());
-    neighbors.erase(
-        std::unique(neighbors.begin(), neighbors.end()), neighbors.end()
-    );
-}
-
-void QTSimulator::subdivideNode(QuadtreeNode *node) {
-    node->is_leaf = false;
-
-    float child_size = node->size / 2.f;
-    for (int i = 0; i < 4; i++) {
-        float x = node->x + (i & 1 ? 1.f : -1.f) * child_size / 2.f;
-        float y = node->y + (i & 2 ? 1.f : -1.f) * child_size / 2.f;
-        node->children[i] = new QuadtreeNode{x, y, child_size, node->depth + 1};
-        node->children[i]->ul_id = node->ul_id;
-        node->children[i]->ur_id = node->ur_id;
-        node->children[i]->vl_id = node->vl_id;
-        node->children[i]->vr_id = node->vr_id;
-        node->cached_neighbors.resize(8);
-    }
-}
-void QTSimulator::smoothing(QuadtreeNode *new_root) {
-
-    std::vector<QuadtreeNode *> leaves;
-    collectLeafNodes(new_root, leaves);
-
-    std::priority_queue<
-        QuadtreeNode *,
-        std::vector<QuadtreeNode *>,
-        QTNLeafNodeFirst>
-        pq(QTNLeafNodeFirst(), std::move(leaves));
-
-    while (!pq.empty()) {
-        auto node = pq.top();
-        pq.pop();
-
-        if (!node->is_leaf)
-            continue;
-
-        float step = node->size / 2.f + 0.1f;
-        int direction[5] = {1, 0, -1, 0, 1};
-        for (int i = 0; i < 4; i++) {
-            float dx = direction[i] * step;
-            float dy = direction[i + 1] * step;
-
-            float x = node->x + dx;
-            float y = node->y + dy;
-
-            if (x < 0 || x > nx || y < 0 || y > ny)
-                continue;
-
-            auto neighbor = getNodeAt(new_root, x, y);
-
-            if (neighbor && node->depth - neighbor->depth > 1) {
-                subdivideNode(neighbor);
-                for (int c = 0; c < 4; c++) {
-                    neighbor->children[c]->phi = neighbor->phi;
-                    pq.push(neighbor->children[c]);
-                }
-            }
-        }
-    }
-}
-
-void QTSimulator::recursiveUpdatePhi(
-    QuadtreeNode *node, float cx, float cy, float radius
-) {
-    float new_phi = circleSDF(cx, cy, radius, node->x, node->y);
-    node->phi = std::min(node->phi, new_phi);
-
-    if (!node->is_leaf) {
-        for (int i = 0; i < 4; i++)
-            recursiveUpdatePhi(node->children[i], cx, cy, radius);
-        return;
-    }
-
-    if (node->size > 1.f && std::abs(new_phi) < node->size) {
-        subdivideNode(node);
-        for (int i = 0; i < 4; i++)
-            recursiveUpdatePhi(node->children[i], cx, cy, radius);
-    }
-    if (node->size < 1.5f && node->phi < 0) {
-        particles.push_back({node->x, node->y});
-    }
-}
-
-void QTSimulator::recursiveFree(QuadtreeNode *node) {
-    if (node->is_leaf) {
-        delete node;
-        return;
-    }
-
-    for (int i = 0; i < 4; i++) {
-        recursiveFree(node->children[i]);
-    }
-    delete node;
-}
-
-QuadtreeNode *
-QTSimulator::getNodeAt(QuadtreeNode *node, float x, float y) const {
-    if (x < 0 || x > nx || y < 0 || y > ny)
-        return nullptr;
-    if (node->is_leaf)
-        return node;
-
-    int child_idx = 0;
-    if (x > node->x)
-        child_idx |= 1;
-    if (y > node->y)
-        child_idx |= 2;
-
-    return getNodeAt(node->children[child_idx], x, y);
-}
-
-void QTSimulator::getNodesIn(
-    QuadtreeNode *node,
-    float x,
-    float y,
-    float radius,
-    std::vector<QuadtreeNode *> &nodes
-) {
-    if (!node)
-        return;
-
-    float half_size = node->size / 2.f;
-    if (node->x + half_size < x - radius ||
-        node->x - half_size > x + radius ||
-        node->y + half_size < y - radius ||
-        node->y - half_size > y + radius) {
-        return;
-    }
-
-    if (node->is_leaf) {
-        nodes.push_back(node);
-    } else {
-        for (int i = 0; i < 4; i++) {
-            getNodesIn(node->children[i], x, y, radius, nodes);
-        }
-    }
-}
-
-void QTSimulator::collectLeafNodes(
-    QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
-) const {
-    if (node->is_leaf) {
-        leaves.push_back(node);
-        return;
-    }
-    for (int i = 0; i < 4; i++) {
-        collectLeafNodes(node->children[i], leaves);
-    }
 }
 
 // ######################### MLS #########################
@@ -989,18 +1180,25 @@ solveMLS(float x, float y, const std::vector<SamplePoint> &samples) {
 InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     InterpolatedData result = {0.0f, 1000.f, 0.0f, 0.0f, 0.0f};
 
-    QuadtreeNode *target = getNodeAt(root, x, y);
-    if (!target)
+    int target_idx = getNodeIdxAt(x, y, root_list);
+    if (target_idx == -1)
         return result;
 
-    float search_radius = target->size * 3.f;
-    std::vector<QuadtreeNode *> neighbors;
-    getNodesIn(root, x, y, search_radius, neighbors);
+    auto &target = getNode(root_list, target_idx);
+    auto &neighbors_idx = target.cached_neighbors_idx;
+    auto neighbors_cnt = target.cached_neighbors_cnt;
 
     float min_x = 0.0f;
     float max_x = nx;
     float min_y = 0.0f;
     float max_y = ny;
+
+    std::vector<int> nodes_to_process;
+    nodes_to_process.reserve(neighbors_cnt + 1);
+    nodes_to_process.push_back(target_idx);
+    for (int i = 0; i < neighbors_cnt; i++) {
+        nodes_to_process.push_back(neighbors_idx[i]);
+    }
 
     // ==========================================================
     // 1. 細胞中心變數插值 (S, phi, pressure)
@@ -1011,18 +1209,19 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     };
     std::vector<CellNode> cell_points;
 
-    for (auto n : neighbors) {
-        cell_points.push_back({n->x, n->y, n->size, n->S, n->phi, n->pressure});
+    for (int n_idx : nodes_to_process) {
+        auto &n = getNode(root_list, n_idx);
+        cell_points.push_back({n.x, n.y, n.size, n.S, n.phi, n.pressure});
 
         // 檢查細胞邊界鏡像 (Mirroring)
-        float dist_left = n->x - min_x;
-        float dist_right = max_x - n->x;
-        float dist_top = n->y - min_y;
-        float dist_bottom = max_y - n->y;
-        float threshold = n->size * 1.5f;
+        float dist_left = n.x - min_x;
+        float dist_right = max_x - n.x;
+        float dist_top = n.y - min_y;
+        float dist_bottom = max_y - n.y;
+        float threshold = n.size * 1.5f;
 
         bool mirror_x = false;
-        float mx = n->x;
+        float mx = n.x;
         if (dist_left < threshold) {
             mirror_x = true;
             mx = min_x - dist_left;
@@ -1032,7 +1231,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
         }
 
         bool mirror_y = false;
-        float my = n->y;
+        float my = n.y;
         if (dist_top < threshold) {
             mirror_y = true;
             my = min_y - dist_top;
@@ -1042,15 +1241,11 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
         }
 
         if (mirror_x)
-            cell_points.push_back(
-                {mx, n->y, n->size, n->S, n->phi, n->pressure}
-            );
+            cell_points.push_back({mx, n.y, n.size, n.S, n.phi, n.pressure});
         if (mirror_y)
-            cell_points.push_back(
-                {n->x, my, n->size, n->S, n->phi, n->pressure}
-            );
+            cell_points.push_back({n.x, my, n.size, n.S, n.phi, n.pressure});
         if (mirror_x && mirror_y)
-            cell_points.push_back({mx, my, n->size, n->S, n->phi, n->pressure});
+            cell_points.push_back({mx, my, n.size, n.S, n.phi, n.pressure});
     }
 
     // 求解細胞中心變數
@@ -1090,11 +1285,12 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     std::vector<SamplePoint> u_samples;
     std::unordered_set<int> visited_u_faces;
 
-    for (auto n : neighbors) {
+    for (int n_idx : nodes_to_process) {
+        auto &n = getNode(root_list, n_idx);
         // 假設你的 Node 中存有左右垂直邊的面索引 (face indices)
         // 論文提到 T-junction 會自動對齊到大 parent face 取得單一速度值
-        int left_face = n->ul_id;
-        int right_face = n->ur_id;
+        int left_face = n.ul_id;
+        int right_face = n.ur_id;
 
         auto add_u_face = [&](int face_idx) {
             if (face_idx == -1 || visited_u_faces.count(face_idx))
@@ -1157,7 +1353,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
         };
 
         // 垂直邊的 X 座標在細胞中心左右，Y 座標與細胞同高
-        float h = n->size;
+        float h = n.size;
         add_u_face(left_face);
         add_u_face(right_face);
     }
@@ -1171,9 +1367,10 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     std::vector<SamplePoint> v_samples;
     std::unordered_set<int> visited_v_faces;
 
-    for (auto n : neighbors) {
-        int top_face = n->vl_id;
-        int bottom_face = n->vr_id;
+    for (int i = 0; i < neighbors_cnt; i++) {
+        auto &n = getNode(root_list, neighbors_idx[i]);
+        int top_face = n.vl_id;
+        int bottom_face = n.vr_id;
 
         auto add_v_face = [&](int face_idx) {
             if (face_idx == -1 || visited_v_faces.count(face_idx))
@@ -1236,7 +1433,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
         };
 
         // 水平邊的 Y 座標在細胞中心上下，X 座標與細胞同寬
-        float h = n->size;
+        float h = n.size;
         add_v_face(bottom_face);
         add_v_face(top_face);
     }
@@ -1245,154 +1442,4 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y) {
     result.v_old = tmp_result_v.second;
 
     return result;
-}
-
-void QTSimulator::findAllEdges() {
-    QTu_new.clear();
-    QTv_new.clear();
-    for (auto leaf : cached_leaves) {
-
-        float half_size = leaf->size / 2.f;
-        float quad_size = leaf->size / 4.f;
-        float step = half_size + 0.1f;
-
-        int node_idx = 0;
-        auto &nodes = leaf->cached_neighbors;
-        for (int dir = 0; dir < 4; dir++) {
-            int neighbot_cnt = leaf->neighbor_cnt[dir];
-
-            float x = leaf->x, y = leaf->y, solid_frac = 0;
-            int face_sgn;
-            std::vector<QuadtreeNode *> adj_cells = {leaf};
-            std::vector<float> coefs;
-
-            // up or down, need update y
-            if (dir & 1) {
-                y += (dir & 2 ? half_size : -half_size);
-            }
-            // left or right, need update x
-            else {
-                x += (dir & 2 ? half_size : -half_size);
-            }
-
-            if (dir == 0)
-                leaf->ul_id = QTu_new.size();
-            if (dir == 1)
-                leaf->vl_id = QTv_new.size();
-            if (dir == 2)
-                leaf->ur_id = QTu_new.size();
-            if (dir == 3)
-                leaf->vr_id = QTv_new.size();
-
-            if (dir <= 1) // left and up
-                face_sgn = -1;
-            else // right and down
-                face_sgn = 1;
-
-            if (neighbot_cnt == 0) {
-                coefs.assign({0});
-                solid_frac = 1;
-            } else if (neighbot_cnt == 2) {
-                adj_cells.push_back(nodes[node_idx]);
-                adj_cells.push_back(nodes[node_idx + 1]);
-
-                float coef = face_sgn * 1.f / (1.5f * nodes[node_idx]->size);
-                coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
-            } else if (neighbot_cnt == 1) {
-                if (nodes[node_idx]->depth == leaf->depth) {
-                    if (dir <= 1)
-                        goto OVERLAY_NODE;
-
-                    adj_cells.push_back(nodes[node_idx]);
-                    float coef = face_sgn * 1.f / leaf->size;
-                    coefs.assign({-coef, coef});
-                    goto UPDATE;
-                }
-
-            OVERLAY_NODE:
-                switch (dir) {
-                case 0:
-                    leaf->ul_id = nodes[0]->ur_id;
-                    break;
-                case 1:
-                    leaf->vl_id = nodes[0]->vr_id;
-                    break;
-                case 2:
-                    leaf->ur_id = nodes[0]->ul_id;
-                    break;
-                case 3:
-                    leaf->vr_id = nodes[0]->vl_id;
-                    break;
-                }
-                node_idx += neighbot_cnt;
-                continue;
-            } else {
-                std::cout << "Some ERROR appear" << std::endl;
-                continue;
-            }
-
-        UPDATE:
-            // up or down, push into v
-            if (dir & 1)
-                QTv_new.push_back({
-                    x,
-                    y,
-                    leaf->size,
-                    0,
-                    solid_frac,
-                    adj_cells,
-                    coefs,
-                });
-            // left or right, push into u
-            else
-                QTu_new.push_back({
-                    x,
-                    y,
-                    leaf->size,
-                    0,
-                    solid_frac,
-                    adj_cells,
-                    coefs,
-                });
-
-            node_idx += neighbot_cnt;
-        }
-    }
-}
-
-float QTSimulator::getVelocity(std::vector<QuadtreeEdge> &field, int id) {
-    if (id == -1)
-        return 0.0f;
-    return field[id].val;
-}
-
-void QTSimulator::cacheNeighbors(QuadtreeNode *new_root) {
-    for (auto leaf : cached_leaves) {
-
-        std::vector<std::pair<int, QuadtreeNode *>> neighbors;
-        getNeighbors(new_root, leaf, neighbors);
-
-        std::vector<QuadtreeNode *> direc_neigh[4];
-        for (auto [dir, node] : neighbors) {
-            leaf->cached_neighbors.push_back(node);
-            leaf->neighbor_cnt[dir]++;
-        }
-    }
-}
-
-void QTSimulator::cacheLeaves(QuadtreeNode *new_root) {
-    cached_leaves.clear();
-    collectLeafNodes(new_root, cached_leaves);
-
-    sort(
-        cached_leaves.begin(),
-        cached_leaves.end(),
-        [](QuadtreeNode *a, QuadtreeNode *b) {
-            if (a->depth != b->depth)
-                return a->depth < b->depth;
-            if (a->x != b->x)
-                return a->x < b->x;
-            return a->y < b->y;
-        }
-    );
 }

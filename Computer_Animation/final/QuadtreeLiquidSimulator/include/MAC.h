@@ -41,6 +41,7 @@ class MACSimulator : public BaseSimulator {
     void markFluidCells();
     void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
     void project();
+    void resampleParticles();
 
     // util functions
     float bilerp(
@@ -56,16 +57,15 @@ class MACSimulator : public BaseSimulator {
     void update(float dt);                         // update every frame
     void addWater(float x, float y, float radius); // add water and dye
     void delWater(float x, float y, float radius); // add water and dye
-    void resampleParticles();
 
     // get functions for renderer
     int getWidth() const override { return nx; }
     int getHeight() const override { return ny; }
-    const std::vector<int> &getCell() const override { return cell_type; }
     const std::vector<Particle> &getParticles() const override {
         return particles;
     }
     std::vector<Line> getLines() const override;
+    bool is_water(int x, int y) const override { return cell_type[IX(x, y)]; }
 
     // get functions for main loop
     float getGravity() { return G; }

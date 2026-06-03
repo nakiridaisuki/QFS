@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iostream>
+
 #include "Base.h"
 #include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
@@ -15,7 +17,7 @@ struct QuadtreeNode {
     bool is_leaf = true;
     bool known = false;
     bool has_particle = false;
-    QuadtreeNode *children[4] = {nullptr};
+    int children_idx[4];
 
     // signed distance to surface, < 0 if inter water
     float phi = std::numeric_limits<float>::infinity(), phi_new;
@@ -23,9 +25,14 @@ struct QuadtreeNode {
     float S = 0.0f, S_new = 0.0f;
     float pressure = 0.0f;
     int ul_id = -1, ur_id = -1, vl_id = -1, vr_id = -1;
-    std::vector<QuadtreeNode *> cached_neighbors;
+    int cached_neighbors_idx[8];
+    int cached_neighbors_cnt = 0;
     int neighbor_cnt[4] = {0};
     int fluid_id = -1;
+
+    bool operator<(const QuadtreeNode &other) const {
+        return depth < other.depth;
+    }
 };
 
 struct QTNSurfaceFirst {
@@ -33,7 +40,7 @@ struct QTNSurfaceFirst {
         return std::abs(a->phi_new) > std::abs(b->phi_new);
     }
 };
-struct QTNLeafNodeFirst {
+struct QTNSmallNodeFirst {
     bool operator()(QuadtreeNode *a, QuadtreeNode *b) {
         return a->depth < b->depth;
     }
@@ -44,7 +51,7 @@ struct QuadtreeEdge {
     float length;
     float val = 0;
     float solid_fraction = 0;
-    std::vector<QuadtreeNode *> adj_cells;
+    std::vector<int> adj_cells_idx;
     std::vector<float> grad_coeff;
     float val_old = 0;
 };
@@ -53,42 +60,13 @@ struct InterpolatedData {
     float S, phi, pressure;
     float u = 0, v = 0;
     float u_old = 0, v_old = 0;
-
-    // InterpolatedData() = default;
-    // InterpolatedData(float s, float p, float pr) : S(s), phi(p), pressure(pr)
-    // {}
-    //
-    // InterpolatedData(const QuadtreeNode *node) {
-    //     if (node) {
-    //         S = node->S;
-    //         phi = node->phi;
-    //         pressure = node->pressure;
-    //     } else {
-    //         S = phi = pressure = 0.0f;
-    //     }
-    // }
-    //
-    // InterpolatedData operator+(const InterpolatedData &x) const {
-    //     return InterpolatedData{
-    //         S + x.S,
-    //         phi + x.phi,
-    //         pressure + x.pressure,
-    //     };
-    // }
-    //
-    // InterpolatedData operator*(const float x) const {
-    //     return InterpolatedData{S * x, phi * x, pressure * x};
-    // }
 };
-
-// struct NeighborData {
-//     InterpolatedData datas;
-//     float distance;
-// };
 
 class QTSimulator : public BaseSimulator {
   private:
-    QuadtreeNode *root;
+    // QuadtreeNode *root;
+    int root_list;
+    std::vector<QuadtreeNode> node_pool[2];
     int nx, ny;
     float G;     // Gravity const
     float Sigma; // surface tension
@@ -100,9 +78,8 @@ class QTSimulator : public BaseSimulator {
     // v for column velocity
     // p for pressure
     std::vector<Particle> particles;
-    std::vector<int> cell_type;
     std::vector<std::vector<int>> particle_idx;
-    std::vector<QuadtreeNode *> cached_leaves;
+    std::vector<int> cached_leaves_idx;
     Eigen::ConjugateGradient<
         Eigen::SparseMatrix<float>,
         Eigen::Lower | Eigen::Upper>
@@ -113,6 +90,8 @@ class QTSimulator : public BaseSimulator {
     void updateParticleIdx();
 
     // Quad Tree simulation functions
+    void computeSizingFunction(float dt);
+    void propagateSizingFunction();
     void QTapplyGravity(float dt);
     void QTproject();
     void advectParticles(float dt);
@@ -120,61 +99,61 @@ class QTSimulator : public BaseSimulator {
     void particleSurfaceToGrid();
     void gridToParticle();
     void resampleParticles();
+    void redistancing();
+    void findAllEdges(int list_idx);
+    void advectQuadtreeDatas(float dt, int list_idx);
+    void setBoundaries();
 
     // Quad Tree functions
-    void initQuadtree(QuadtreeNode *node, int max_depth);
-    void subdivideNode(QuadtreeNode *node);
-    void recursiveGetLines(QuadtreeNode *node, std::vector<Line> &lines) const;
-    void
-    recursiveUpdatePhi(QuadtreeNode *node, float cx, float cy, float radius);
-    void recursiveFree(QuadtreeNode *node);
-    void recursiveBuildTree(QuadtreeNode *node, float dt);
-    void advectQuadtreeDatas(float dt);
-    void computeSizingFunction(float dt);
-    void propagateSizingFunction();
-    void redistancing();
-    void smoothing(QuadtreeNode *new_root);
-
-    void findAllEdges();
+    int allocate(float x, float y, float size, int depth, int list_idx) {
+        int idx = node_pool[list_idx].size();
+        node_pool[list_idx].push_back({x, y, size, depth});
+        return idx;
+    }
+    QuadtreeNode &getNode(int list_idx, int node_idx) {
+        return node_pool[list_idx][node_idx];
+    }
+    const QuadtreeNode &getNode(int list_idx, int node_idx = 0) const {
+        return node_pool[list_idx][node_idx];
+    }
+    void initQuadtree(int max_depth, int list_idx, int node_idx = 0);
+    void subdivideNode(int list_idx, int node_idx = 0);
+    void smoothing(int list_idx);
+    void recursiveGetLines(
+        std::vector<Line> &lines, int list_idx, int node_idx = 0
+    ) const;
+    void recursiveUpdatePhi(
+        float cx, float cy, float radius, int list_idx, int node_idx = 0
+    );
+    void recursiveBuildTree(float dt, int list_idx, int node_idx = 0);
+    void cacheNeighbors(int list_idx);
+    void cacheLeaves(int list_idx);
+    int getNodeIdxAt(float x, float y, int list_idx, int node_idx = 0) const;
+    // void getNodesIn(
+    //     QuadtreeNode *node,
+    //     float x,
+    //     float y,
+    //     float radius,
+    //     std::vector<QuadtreeNode *> &nodes
+    // );
+    void getNeighbors(
+        std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
+    );
+    void collectLeafNodes(
+        std::vector<int> &leaves_idx, int list_idx, int node_idx = 0
+    ) const;
 
     // util functions
     int IX(int i, int j) const { return i + j * nx; }
-    int IX_u(int i, int j) const { return i + j * (nx + 1); }
-    int IX_v(int i, int j) const { return i + j * nx; }
-    void cacheNeighbors(QuadtreeNode *new_root);
-    void cacheLeaves(QuadtreeNode *new_root);
     float getVelocity(std::vector<QuadtreeEdge> &field, int id);
     InterpolatedData advect(float x, float y, float dt);
-    QuadtreeNode *getNodeAt(QuadtreeNode *node, float x, float y) const;
-    void getNodesIn(
-        QuadtreeNode *node,
-        float x,
-        float y,
-        float radius,
-        std::vector<QuadtreeNode *> &nodes
-    );
-    void getNeighbors(
-        QuadtreeNode *root,
-        QuadtreeNode *node,
-        std::vector<std::pair<int, QuadtreeNode *>> &neighbors
-    );
-    // NeighborData getNeighborData(QuadtreeNode *node, int direction);
     Particle nearestParticle(float x, float y, float radius);
     void commitQuadtreeS();
     void commitQuadtreePhi();
-    void collectLeafNodes(
-        QuadtreeNode *node, std::vector<QuadtreeNode *> &leaves
-    ) const;
     float circleSDF(float cx, float cy, float radius, float x, float y) {
         return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
     };
     InterpolatedData MLSinterpolate(float x, float y);
-    float bilerp(
-        const std::vector<float> &field, int w, int h, float x, float y
-    ) const;
-    void bidistri(
-        std::vector<float> &field, int w, int h, float x, float y, float value
-    );
 
   public:
     QTSimulator(int width, int height);
@@ -186,14 +165,19 @@ class QTSimulator : public BaseSimulator {
     // get functions for renderer
     int getWidth() const override { return nx; }
     int getHeight() const override { return ny; }
-    const std::vector<int> &getCell() const override { return cell_type; }
-    const QuadtreeNode *getNodeAt(float x, float y) const {
-        return getNodeAt(root, x, y);
+    const QuadtreeNode &getNodeAt(float x, float y) const {
+        int idx = getNodeIdxAt(x, y, root_list);
+        return getNode(root_list, idx);
     };
     const std::vector<Particle> &getParticles() const override {
         return particles;
     }
     std::vector<Line> getLines() const override;
+    bool is_water(int x, int y) const override {
+        // std::cout << node_pool[root_list].size() << std::endl;
+        int idx = getNodeIdxAt(x + 0.5, y + 0.5, root_list);
+        return getNode(root_list, idx).phi <= 0;
+    }
 
     // get functions for main loop
     float getGravity() { return G; }

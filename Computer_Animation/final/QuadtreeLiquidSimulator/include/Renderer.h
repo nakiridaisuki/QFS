@@ -38,16 +38,18 @@ class FluidRenderer {
     void draw(
         bool showGrid = false, bool showParticle = false, bool showPhi = false
     ) {
-        const auto &celltype = sim.getCell();
         int nx = sim.getWidth();
         int ny = sim.getHeight();
 
         // 在 CPU 端快速填充像素
-        for (int i = 0; i < nx * ny; ++i) {
-            if (celltype[i]) {
-                pixels[i] = Color{0, 50, 100, 255}; // 你的科技螢光藍
-            } else {
-                pixels[i] = BLANK; // 透明或黑色
+        for (int j = 0; j < ny; j++) {
+            for (int i = 0; i < ny; i++) {
+                int idx = i + j * nx;
+                if (sim.is_water(i, j)) {
+                    pixels[idx] = Color{0, 50, 100, 255}; // 你的科技螢光藍
+                } else {
+                    pixels[idx] = BLANK; // 透明或黑色
+                }
             }
         }
 
@@ -71,7 +73,7 @@ class FluidRenderer {
                         int idx = i + j * nx;
                         float phi =
                             qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
-                                ->phi;
+                                .phi;
 
                         auto color = BLACK;
                         if (phi < 0)

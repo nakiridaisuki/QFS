@@ -20,7 +20,7 @@ class FluidRenderer {
 
         // 建立與模擬網格大小相同的 Image
         pixels = new Color[sim.getWidth() * sim.getHeight()];
-        image = {
+        image  = {
             pixels,
             sim.getWidth(),
             sim.getHeight(),
@@ -58,7 +58,7 @@ class FluidRenderer {
 
         // 放大畫回螢幕上
         Rectangle source = {0, 0, (float)nx, (float)ny};
-        Rectangle dest = {0, 0, (float)screenWidth, (float)screenHeight};
+        Rectangle dest   = {0, 0, (float)screenWidth, (float)screenHeight};
         DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
 
         float scaleX = (float)screenWidth / nx;
@@ -75,9 +75,15 @@ class FluidRenderer {
                             qt_sim.getNodeAt((float)i + 0.5f, (float)j + 0.5f)
                                 .phi;
 
-                        auto color = BLACK;
-                        if (phi < 0)
-                            color = Color{0, 50, 100, 255};
+                        Color color;
+                        if (phi <= 0.f)
+                            color = Color{
+                                0, (unsigned char)(20.f * std::abs(phi)), 0, 100
+                            };
+                        else
+                            color = Color{
+                                (unsigned char)(20.f * std::abs(phi)), 0, 0, 100
+                            };
 
                         pixels[idx] = color;
                     }
@@ -85,7 +91,7 @@ class FluidRenderer {
                 UpdateTexture(texture, pixels);
 
                 Rectangle source = {0, 0, (float)nx, (float)ny};
-                Rectangle dest = {
+                Rectangle dest   = {
                     0, 0, (float)screenWidth, (float)screenHeight
                 };
                 DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);

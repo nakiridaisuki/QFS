@@ -10,7 +10,7 @@
 int main() {
     const int screenWidth = 1000;
     const int screenHeight = 1000;
-    const int simWidth = 128;
+    const int simWidth = 64;
     const int simHeight = simWidth;
     const int FPS = 60;
 
@@ -47,26 +47,30 @@ int main() {
         Vector2 mousePos = GetMousePosition();
 
         // 判斷滑鼠是不是在 UI 面板上
-        bool isMouseOnUI =
-            showUI && CheckCollisionPointRec(mousePos, uiPanelRec);
-
-        // 3. 處理滑鼠輸入 (只有滑鼠不在 UI 上時才加水)
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !isMouseOnUI) {
-            float gridX = mousePos.x / (screenWidth / (float)sim.getWidth());
-            float gridY = mousePos.y / (screenHeight / (float)sim.getHeight());
-
-            // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
-            sim.addWater(gridX, gridY, brushRadius);
-        }
-        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !isMouseOnUI) {
-            float gridX = mousePos.x / (screenWidth / (float)sim.getWidth());
-            float gridY = mousePos.y / (screenHeight / (float)sim.getHeight());
-
-            // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
-            sim.delWater(gridX, gridY, brushRadius);
-        }
-
         if (frame_cnt % (int)speed == 0) {
+            bool isMouseOnUI =
+                showUI && CheckCollisionPointRec(mousePos, uiPanelRec);
+
+            // 3. 處理滑鼠輸入 (只有滑鼠不在 UI 上時才加水)
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !isMouseOnUI) {
+                float gridX =
+                    mousePos.x / (screenWidth / (float)sim.getWidth());
+                float gridY =
+                    mousePos.y / (screenHeight / (float)sim.getHeight());
+
+                // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
+                sim.addWater(gridX, gridY, brushRadius);
+            }
+            if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !isMouseOnUI) {
+                float gridX =
+                    mousePos.x / (screenWidth / (float)sim.getWidth());
+                float gridY =
+                    mousePos.y / (screenHeight / (float)sim.getHeight());
+
+                // 這裡原本寫死的 4.0f 改成 UI 變數 brushRadius
+                sim.delWater(gridX, gridY, brushRadius);
+            }
+
             float frameTime = std::min(GetFrameTime(), 0.0333f);
             float idel_dt;
             if (sim.getMaxVel() == 0)

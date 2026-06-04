@@ -27,10 +27,6 @@ struct QuadtreeNode {
     int cached_neighbors_cnt = 0;
     int neighbor_cnt[4]      = {0};
     int fluid_id             = -1;
-
-    bool operator<(const QuadtreeNode &other) const {
-        return depth < other.depth;
-    }
 };
 
 struct QuadtreeEdge {
@@ -86,8 +82,9 @@ class QTSimulator : public BaseSimulator {
     // u for row velocity
     // v for column velocity
     std::vector<Particle> particles;
-    std::vector<std::vector<int>> particle_idx;
-    std::vector<int> cached_leaves_idx;
+    std::vector<int> phash_head, phash_next;
+    std::vector<int> cached_leaves_idx, leaf_table[2];
+    std::vector<Eigen::Triplet<float>> QTtriplets;
     Eigen::ConjugateGradient<
         Eigen::SparseMatrix<float>,
         Eigen::Lower | Eigen::Upper>
@@ -146,9 +143,7 @@ class QTSimulator : public BaseSimulator {
     void getNeighbors(
         std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
     );
-    void collectLeafNodes(
-        std::vector<int> &leaves_idx, int list_idx, int node_idx = 0
-    ) const;
+    void collectLeafNodes(std::vector<int> &leaves_idx, int list_idx) const;
 
     // util functions
     float distance2(float x1, float y1, float x2, float y2);
@@ -165,7 +160,7 @@ class QTSimulator : public BaseSimulator {
     MLSMirrorNode(std::vector<MLSSamplePoint> &sample_points, int node_idx);
     void MLSMirrorEdge(
         std::vector<MLSSamplePoint> &sample_points,
-        std::vector<int> &visited_faces,
+        std::vector<bool> &visited_faces,
         int face_idx,
         std::vector<QuadtreeEdge> &field,
         bool is_u

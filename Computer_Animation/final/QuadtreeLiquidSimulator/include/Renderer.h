@@ -76,14 +76,13 @@ class FluidRenderer {
                                 .phi;
 
                         Color color;
+                        float fraction = 1.f - (std::abs(phi) / (float)nx);
+                        unsigned char value =
+                            std::clamp(int(fraction * 255), 0, 255);
                         if (phi <= 0.f)
-                            color = Color{
-                                0, (unsigned char)(20.f * std::abs(phi)), 0, 100
-                            };
+                            color = Color{0, value, 0, 255};
                         else
-                            color = Color{
-                                (unsigned char)(20.f * std::abs(phi)), 0, 0, 100
-                            };
+                            color = Color{value, 0, 0, 255};
 
                         pixels[idx] = color;
                     }

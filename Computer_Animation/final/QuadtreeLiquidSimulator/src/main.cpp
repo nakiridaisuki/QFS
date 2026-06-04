@@ -8,11 +8,11 @@
 #include "raygui.h"
 
 int main() {
-    const int screenWidth = 1000;
+    const int screenWidth  = 1000;
     const int screenHeight = 1000;
-    const int simWidth = 64;
-    const int simHeight = simWidth;
-    const int FPS = 60;
+    const int simWidth     = 256;
+    const int simHeight    = simWidth;
+    const int FPS          = 60;
 
     InitWindow(
         screenWidth, screenHeight, "MAC Grid Fluid Simulation - Stable Fluids"
@@ -30,15 +30,15 @@ int main() {
 
     // === UI 需要的參數變數 ===
     float brushRadius = 4.0f;
-    float gravity = sim.getGravity();
-    float tension = sim.getSurfaceTension();
-    bool showUI = true;
-    int iterations = 1;
-    float speed = 1.f;
-    int frame_cnt = 0;
-    bool showGrid = true;
+    float gravity     = sim.getGravity();
+    float tension     = sim.getSurfaceTension();
+    bool showUI       = true;
+    int iterations    = 1;
+    float speed       = 1.f;
+    int frame_cnt     = 0;
+    bool showGrid     = true;
     bool showParticle = false;
-    bool showPhi = false;
+    bool showPhi      = false;
     // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
     Rectangle uiPanelRec = {10, 60, 260, 150};
 

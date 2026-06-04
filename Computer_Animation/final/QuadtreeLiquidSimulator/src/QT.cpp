@@ -5,21 +5,27 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <math.h>
+#include <omp.h>
 #include <queue>
+#include <random>
 #include <utility>
 #include <vector>
 
 // PUBLIC
 QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
-    particle_idx.resize(nx * ny, std::vector<int>(8));
+    phash_head.resize(nx * ny, -1);
+    phash_next.clear();
+    leaf_table[0].clear();
+    leaf_table[1].clear();
     G     = 150.f;
     Sigma = 0.0f;
 
-    solver.setMaxIterations(80);
-    solver.setTolerance(1e-3);
-    Eigen::setNbThreads(6);
+    // solver.setMaxIterations(80);
+    // solver.setTolerance(1e-3);
+    // Eigen::setNbThreads(6);
 
     root_list = 0;
     allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
@@ -27,8 +33,12 @@ QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
 }
 void QTSimulator::reset() {
     particles.clear();
+    phash_head.assign(nx * ny, -1);
+    phash_next.clear();
     node_pool[0].clear();
     node_pool[1].clear();
+    leaf_table[0].clear();
+    leaf_table[1].clear();
 
     root_list = 0;
     allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
@@ -37,9 +47,11 @@ void QTSimulator::reset() {
 
 void QTSimulator::addWater(float x, float y, float radius) {
     recursiveUpdatePhi(x, y, radius, false, root_list);
+    leaf_table[root_list].clear();
     smoothing(root_list);
     cacheLeaves(root_list);
     cacheNeighbors(root_list);
+    updateParticleIdx();
 }
 void QTSimulator::delWater(float x, float y, float radius) {
     float r2 = radius * radius;
@@ -49,9 +61,11 @@ void QTSimulator::delWater(float x, float y, float radius) {
         });
     particles.erase(new_end, particles.end());
     recursiveUpdatePhi(x, y, radius, true, root_list);
+    leaf_table[root_list].clear();
     smoothing(root_list);
     cacheLeaves(root_list);
     cacheNeighbors(root_list);
+    updateParticleIdx();
 }
 
 void QTSimulator::recursiveGetLines(
@@ -93,6 +107,7 @@ void QTSimulator::update(float dt) {
 
     int new_root_list = 1 - root_list;
     node_pool[new_root_list].clear();
+    leaf_table[new_root_list].clear();
     allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, new_root_list);
     recursiveBuildTree(dt, new_root_list);
 
@@ -157,14 +172,15 @@ void QTSimulator::computeSizingFunction(float dt) {
      * Compute the size function value
      */
 
+    float T1 = 0.9, T2 = 0.01;
+    float R_t = std::pow(T1, dt / T2);
+
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
         if (std::abs(leaf.phi) < leaf.size * 1.5f) {
             float gamma_phi = 4.f;
             float gamma_u   = 3.f;
-
-            float T1 = 0.9, T2 = 0.01;
-            float R_t = std::pow(T1, dt / T2);
 
             // // 0: left
             // // 1: up
@@ -214,6 +230,7 @@ void QTSimulator::computeSizingFunction(float dt) {
         }
     }
 
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
         leaf.S     = leaf.S_new;
@@ -227,7 +244,9 @@ void QTSimulator::propagateSizingFunction() {
      */
 
     int iterations = 5;
+#pragma omp parallel
     for (int iter = 0; iter < iterations; iter++) {
+#pragma omp for
         for (int leaf_idx : cached_leaves_idx) {
             auto &leaf = getNode(root_list, leaf_idx);
 
@@ -247,6 +266,7 @@ void QTSimulator::propagateSizingFunction() {
             leaf.S_new /= total_area;
         }
 
+#pragma omp for
         for (auto leaf_idx : cached_leaves_idx) {
             auto &leaf = getNode(root_list, leaf_idx);
             leaf.S     = leaf.S_new;
@@ -296,8 +316,8 @@ void QTSimulator::findAllEdges(int list_idx) {
         float quad_size = leaf.size / 4.f;
         float step      = half_size + 0.1f;
 
-        int node_idx = 0;
-        auto &nodes  = leaf.cached_neighbors_idx;
+        int neighbor_idx = 0;
+        auto &nodes_idx  = leaf.cached_neighbors_idx;
         for (int dir = 0; dir < 4; dir++) {
             int neighbot_cnt = leaf.neighbor_cnt[dir];
 
@@ -305,7 +325,6 @@ void QTSimulator::findAllEdges(int list_idx) {
             int face_sgn;
             std::vector<int> adj_cells_idx = {leaf_idx};
             std::vector<float> coefs;
-            auto &first_neighbor = getNode(list_idx, nodes[node_idx]);
 
             // up or down, need update y
             if (dir & 1) {
@@ -334,17 +353,19 @@ void QTSimulator::findAllEdges(int list_idx) {
                 coefs.assign({0});
                 solid_frac = 1;
             } else if (neighbot_cnt == 2) {
-                adj_cells_idx.push_back(nodes[node_idx]);
-                adj_cells_idx.push_back(nodes[node_idx + 1]);
+                auto &n_0 = getNode(list_idx, nodes_idx[neighbor_idx]);
+                adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
+                adj_cells_idx.push_back(nodes_idx[neighbor_idx + 1]);
 
-                float coef = face_sgn * 1.f / (1.5f * first_neighbor.size);
+                float coef = face_sgn * 1.f / (1.5f * n_0.size);
                 coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
             } else if (neighbot_cnt == 1) {
-                if (first_neighbor.depth == leaf.depth) {
+                auto &n_0 = getNode(list_idx, nodes_idx[neighbor_idx]);
+                if (n_0.depth == leaf.depth) {
                     if (dir <= 1)
                         goto OVERLAY_NODE;
 
-                    adj_cells_idx.push_back(nodes[node_idx]);
+                    adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
                     float coef = face_sgn * 1.f / leaf.size;
                     coefs.assign({-coef, coef});
                     goto UPDATE;
@@ -353,19 +374,19 @@ void QTSimulator::findAllEdges(int list_idx) {
             OVERLAY_NODE:
                 switch (dir) {
                 case 0:
-                    leaf.ul_id = first_neighbor.ur_id;
+                    leaf.ul_id = n_0.ur_id;
                     break;
                 case 1:
-                    leaf.vl_id = first_neighbor.vr_id;
+                    leaf.vl_id = n_0.vr_id;
                     break;
                 case 2:
-                    leaf.ur_id = first_neighbor.ul_id;
+                    leaf.ur_id = n_0.ul_id;
                     break;
                 case 3:
-                    leaf.vr_id = first_neighbor.vl_id;
+                    leaf.vr_id = n_0.vl_id;
                     break;
                 }
-                node_idx += neighbot_cnt;
+                neighbor_idx += neighbot_cnt;
                 continue;
             } else {
                 std::cout << "Some ERROR appear" << std::endl;
@@ -396,7 +417,7 @@ void QTSimulator::findAllEdges(int list_idx) {
                     coefs,
                 });
 
-            node_idx += neighbot_cnt;
+            neighbor_idx += neighbot_cnt;
         }
     }
 }
@@ -408,17 +429,21 @@ void QTSimulator::advectQuadtreeDatas(float dt, int list_idx) {
      * advect the Phi, Size function and velocity data
      */
 
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf         = getNode(list_idx, leaf_idx);
         auto advected_leaf = advect(leaf.x, leaf.y, dt, OPT_CELL_ALL);
-        leaf.phi           = advected_leaf.phi;
-        leaf.S             = advected_leaf.S;
+
+        leaf.phi = advected_leaf.phi;
+        leaf.S   = advected_leaf.S;
     }
 
+#pragma omp parallel for
     for (auto &face : QTu_new) {
         auto advected_face = advect(face.x, face.y, dt, OPT_U_ALL);
         face.val           = advected_face.u;
     }
+#pragma omp parallel for
     for (auto &face : QTv_new) {
         auto advected_face = advect(face.x, face.y, dt, OPT_V_ALL);
         face.val           = advected_face.v;
@@ -451,14 +476,16 @@ void QTSimulator::particleToGrid() {
                 if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
                     continue;
 
-                for (int idx : particle_idx[IX(ni, nj)]) {
+                int cell_idx = IX(ni, nj);
+                for (int idx = phash_head[cell_idx]; idx != -1;
+                     idx     = phash_next[idx]) {
                     auto &p = particles[idx];
 
                     float dx = std::abs(p.x - face.x);
                     float dy = std::abs(p.y - face.y);
 
-                    float wx = std::max(0.f, 1.f - dx / face.length);
-                    float wy = std::max(0.f, 1.f - dy / face.length);
+                    float wx = std::max(0.f, 1.f - dx / search_radius);
+                    float wy = std::max(0.f, 1.f - dy / search_radius);
                     float w  = wx * wy;
 
                     if (w > 0) {
@@ -475,9 +502,11 @@ void QTSimulator::particleToGrid() {
             face.val = sum_val / sum_w;
     };
 
+#pragma omp parallel for
     for (int i = 0; i < QTu.size(); i++)
         updateFace(QTu[i], true);
 
+#pragma omp parallel for
     for (int i = 0; i < QTv.size(); i++)
         updateFace(QTv[i], false);
 }
@@ -488,6 +517,7 @@ void QTSimulator::particleSurfaceToGrid() {
      * reconstruct the surface by particles
      */
 
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
         if (leaf.size < 1.5f && leaf.phi < leaf.size) {
@@ -511,6 +541,7 @@ void QTSimulator::QTapplyGravity(float dt) {
      * add gravity on horizontial edges
      */
 
+#pragma omp parallel for
     for (auto &face : QTv) {
         bool is_water = false;
         for (int node_idx : face.adj_cells_idx)
@@ -554,9 +585,15 @@ void QTSimulator::QTproject() {
 
     Eigen::VectorXf div(fluid_count);
     div.setZero();
-    std::vector<Eigen::Triplet<float>> QTtriplets;
+    QTtriplets.clear();
 
-    auto addFace = [&](QuadtreeEdge &face) {
+    int max_threads = omp_get_max_threads();
+    static std::vector<std::vector<Eigen::Triplet<float>>> thread_triplets(
+        max_threads
+    );
+
+    auto addFace = [&](QuadtreeEdge &face,
+                       std::vector<Eigen::Triplet<float>> &local_trip) {
         float u_star = face.val;
         float VA     = face.length * (1.f - face.solid_fraction);
 
@@ -576,6 +613,7 @@ void QTSimulator::QTproject() {
                 continue;
             int row = cell_i.fluid_id;
 
+#pragma omp atomic
             div[row] += VA * u_star * face.grad_coeff[i];
 
             for (int j = 0; j < face.adj_cells_idx.size(); j++) {
@@ -586,14 +624,27 @@ void QTSimulator::QTproject() {
 
                 float val =
                     face_weight * face.grad_coeff[i] * face.grad_coeff[j];
-                QTtriplets.push_back({row, col, val});
+                local_trip.push_back({row, col, val});
             }
         }
     };
-    for (auto &face : QTu)
-        addFace(face);
-    for (auto &face : QTv)
-        addFace(face);
+
+#pragma omp parallel
+    {
+        int tid       = omp_get_thread_num();
+        auto &local_t = thread_triplets[tid];
+        local_t.clear();
+
+#pragma omp for nowait
+        for (auto &face : QTu)
+            addFace(face, local_t);
+#pragma omp for nowait
+        for (auto &face : QTv)
+            addFace(face, local_t);
+    }
+
+    for (const auto &local_t : thread_triplets)
+        QTtriplets.insert(QTtriplets.end(), local_t.begin(), local_t.end());
 
     // Eigen solvers
     Eigen::SparseMatrix<float> A(fluid_count, fluid_count);
@@ -621,8 +672,10 @@ void QTSimulator::QTproject() {
         face.val -= W_prime * grad_p;
     };
 
+#pragma omp parallel for
     for (auto &face : QTu)
         updateFace(face);
+#pragma omp parallel for
     for (auto &face : QTv)
         updateFace(face);
 }
@@ -635,6 +688,7 @@ void QTSimulator::gridToParticle() {
 
     float flipRatio = 0.95f;
 
+#pragma omp parallel for
     for (auto &p : particles) {
         auto data        = MLSinterpolate(p.x, p.y, OPT_VEL_ALL);
         float u_new_grid = data.u;
@@ -660,6 +714,7 @@ void QTSimulator::advectParticles(float dt) {
      * advect the velocity
      */
 
+#pragma omp parallel for
     for (auto &p : particles) {
         auto d1     = MLSinterpolate(p.x, p.y, OPT_VEL_ALL);
         float mid_x = p.x + d1.u * dt * 0.5f;
@@ -700,18 +755,36 @@ void QTSimulator::resampleParticles() {
         });
     particles.erase(new_end, particles.end());
 
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(root_list, leaf_idx);
-        if (leaf.phi < 0 &&
-            leaf.size < 1.5f &&
-            leaf.phi > -leaf.size &&
-            !leaf.has_particle) {
+    int max_threads = omp_get_max_threads();
+    static std::vector<std::vector<Particle>> thread_particles(max_threads);
 
-            float px  = leaf.x + (((rand() % 100) / 100.0f) - 0.5f) * leaf.size;
-            float py  = leaf.y + (((rand() % 100) / 100.0f) - 0.5f) * leaf.size;
-            auto data = MLSinterpolate(px, py, OPT_VEL_ALL);
-            particles.push_back({px, py, data.u, data.v});
+#pragma omp parallel
+    {
+        int tid       = omp_get_thread_num();
+        auto &local_p = thread_particles[tid];
+        local_p.clear();
+
+        thread_local std::mt19937 gen(std::random_device{}());
+        std::uniform_real_distribution<float> dis(-0.5f, 0.5f);
+
+#pragma omp for
+        for (int leaf_idx : cached_leaves_idx) {
+            auto &leaf = getNode(root_list, leaf_idx);
+            if (leaf.phi < 0 &&
+                leaf.size < 1.5f &&
+                leaf.phi > -leaf.size &&
+                !leaf.has_particle) {
+
+                float px  = leaf.x + dis(gen) * leaf.size;
+                float py  = leaf.y + dis(gen) * leaf.size;
+                auto data = MLSinterpolate(px, py, OPT_VEL_ALL);
+                local_p.push_back({px, py, data.u, data.v});
+            }
         }
+    }
+
+    for (const auto &local_p : thread_particles) {
+        particles.insert(particles.end(), local_p.begin(), local_p.end());
     }
 }
 
@@ -721,20 +794,16 @@ void QTSimulator::updateParticleIdx() {
      * update grid hash data
      */
 
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            particle_idx[IX(i, j)].clear();
-        }
-    }
+    phash_head.assign(nx * ny, -1);
+    phash_next.resize(particles.size());
     for (int i = 0; i < particles.size(); i++) {
         auto &p = particles[i];
-        int ix  = p.x;
-        int iy  = p.y;
+        int ix  = std::clamp((int)p.x, 0, nx - 1);
+        int iy  = std::clamp((int)p.y, 0, ny - 1);
 
-        ix = std::clamp(ix, 0, nx - 1);
-        iy = std::clamp(iy, 0, ny - 1);
-
-        particle_idx[IX(ix, iy)].push_back(i);
+        int cell_idx         = IX(ix, iy);
+        phash_next[i]        = phash_head[cell_idx];
+        phash_head[cell_idx] = i;
     }
 }
 
@@ -744,50 +813,70 @@ void QTSimulator::redistancing() {
      * recompute the phi by particles
      */
 
-    auto surfaceFirst = [&](int a_idx, int b_idx) {
-        return std::abs(getNode(root_list, a_idx).phi_new) >
-               std::abs(getNode(root_list, b_idx).phi_new);
-    };
-    std::priority_queue<int, std::vector<int>, decltype(surfaceFirst)> pq(
-        surfaceFirst
-    );
+    using PQElement = std::pair<float, int>; // {abs_phi, node_idx}
 
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(root_list, leaf_idx);
-        // if (std::abs(leaf.phi) < 0.5) {
-        //     leaf.phi_new = leaf.phi;
-        if (std::abs(leaf.phi) < leaf.size * 1.5f) {
+    int max_threads    = omp_get_max_threads();
+    int total_elements = 0;
+    static std::vector<std::vector<PQElement>> thread_elements(max_threads);
 
-            if (leaf.size < 1.5f) {
-                auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
+#pragma omp parallel
+    {
+        int tid       = omp_get_thread_num();
+        auto &local_e = thread_elements[tid];
+        local_e.clear();
 
-                if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-                    leaf.phi_new = std::numeric_limits<float>::infinity();
-                    continue;
+#pragma omp for
+        for (int leaf_idx : cached_leaves_idx) {
+            auto &leaf = getNode(root_list, leaf_idx);
+            if (std::abs(leaf.phi) < leaf.size * 1.5f) {
+
+                if (leaf.size < 1.5f) {
+                    auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
+
+                    if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
+                        leaf.phi_new = std::numeric_limits<float>::infinity();
+                        continue;
+                    }
+
+                    float dist = std::sqrt(
+                        (leaf.x - nearest_p.x) * (leaf.x - nearest_p.x) +
+                        (leaf.y - nearest_p.y) * (leaf.y - nearest_p.y)
+                    );
+                    dist -= particle_radius;
+
+                    leaf.phi = std::min(leaf.phi, dist);
                 }
-
-                float dist = std::sqrt(
-                    (leaf.x - nearest_p.x) * (leaf.x - nearest_p.x) +
-                    (leaf.y - nearest_p.y) * (leaf.y - nearest_p.y)
-                );
-                dist -= particle_radius;
-
-                leaf.phi = std::min(leaf.phi, dist);
+                leaf.phi_new = leaf.phi;
+                local_e.push_back({std::abs(leaf.phi_new), leaf_idx});
+            } else {
+                leaf.phi_new = std::numeric_limits<float>::infinity();
             }
-            leaf.phi_new = leaf.phi;
-            pq.push(leaf_idx);
-        } else {
-            leaf.phi_new = std::numeric_limits<float>::infinity();
         }
+
+#pragma omp atomic
+        total_elements += local_e.size();
     }
 
-    if (pq.empty()) {
+    std::vector<PQElement> init_elements;
+    init_elements.reserve(total_elements);
+    for (const auto &local_elems : thread_elements)
+        init_elements.insert(
+            init_elements.end(), local_elems.begin(), local_elems.end()
+        );
+
+    if (init_elements.empty()) {
         return;
     }
 
+    std::priority_queue<
+        PQElement,
+        std::vector<PQElement>,
+        std::greater<PQElement>>
+        pq(std::greater<PQElement>(), std::move(init_elements));
+
     while (!pq.empty()) {
-        int curr_node_idx = pq.top();
-        auto &curr_node   = getNode(root_list, curr_node_idx);
+        auto [curr_abs_phi, curr_node_idx] = pq.top();
+        auto &curr_node                    = getNode(root_list, curr_node_idx);
         pq.pop();
 
         if (curr_node.known)
@@ -798,17 +887,15 @@ void QTSimulator::redistancing() {
             int neighbor_idx = curr_node.cached_neighbors_idx[i];
             auto &neighbor   = getNode(root_list, neighbor_idx);
             float dist       = std::sqrt(
-                pow(curr_node.x - neighbor.x, 2) +
-                pow(curr_node.y - neighbor.y, 2)
+                distance2(curr_node.x, curr_node.y, neighbor.x, neighbor.y)
             );
-
             dist = neighbor.phi < 0 ? -dist : dist;
 
             float proposed_phi_new = curr_node.phi_new + dist;
 
             if (std::abs(proposed_phi_new) < std::abs(neighbor.phi_new)) {
                 neighbor.phi_new = proposed_phi_new;
-                pq.push(neighbor_idx);
+                pq.push({std::abs(neighbor.phi_new), neighbor_idx});
             }
         }
     }
@@ -852,6 +939,8 @@ void QTSimulator::subdivideNode(int list_idx, int node_idx) {
         child.ur_id = node.ur_id;
         child.vl_id = node.vl_id;
         child.vr_id = node.vr_id;
+        child.phi   = node.phi;
+        child.S     = node.S;
     }
 }
 
@@ -922,21 +1011,22 @@ void QTSimulator::recursiveUpdatePhi(
 
     float node_x, node_y;
     float new_phi, node_phi, node_size;
-    bool node_is_leaf;
+    bool node_is_leaf, node_has_particle;
     {
         auto &node = getNode(list_idx, node_idx);
         new_phi    = circleSDF(cx, cy, radius, node.x, node.y);
 
-        // if (is_delete && node.phi <= 0.f)
-        //     node.phi = std::max(node.phi, -new_phi);
-        // else if (!is_delete && node.phi > 0.f)
-        node.phi = std::min(node.phi, new_phi);
+        if (is_delete && node.phi <= 0.f)
+            node.phi = std::max(node.phi, -new_phi);
+        else
+            node.phi = std::min(node.phi, new_phi);
 
-        node_x       = node.x;
-        node_y       = node.y;
-        node_size    = node.size;
-        node_phi     = node.phi;
-        node_is_leaf = node.is_leaf;
+        node_x            = node.x;
+        node_y            = node.y;
+        node_size         = node.size;
+        node_phi          = node.phi;
+        node_is_leaf      = node.is_leaf;
+        node_has_particle = node.has_particle;
     }
 
     if (!node_is_leaf) {
@@ -964,21 +1054,18 @@ void QTSimulator::recursiveUpdatePhi(
                 getNode(list_idx, node_idx).children_idx[i]
             );
     }
-    if (node_size < 1.5f && node_phi < 0) {
+    if (node_size < 1.5f && node_phi < 0 && !node_has_particle) {
         particles.push_back({node_x, node_y});
     }
 }
 
 void QTSimulator::collectLeafNodes(
-    std::vector<int> &leaves_idx, int list_idx, int node_idx
+    std::vector<int> &leaves_idx, int list_idx
 ) const {
-    auto &node = getNode(list_idx, node_idx);
-    if (node.is_leaf) {
-        leaves_idx.push_back(node_idx);
-        return;
-    }
-    for (int i = 0; i < 4; i++) {
-        collectLeafNodes(leaves_idx, list_idx, node.children_idx[i]);
+    for (int i = 0; i < node_pool[list_idx].size(); i++) {
+        auto &node = getNode(list_idx, i);
+        if (node.is_leaf)
+            leaves_idx.push_back(i);
     }
 }
 
@@ -999,9 +1086,27 @@ void QTSimulator::cacheLeaves(int list_idx) {
             return a.y < b.y;
         }
     );
+
+    leaf_table[list_idx].assign(nx * ny, -1);
+#pragma omp parallel for
+    for (int leaf_idx : cached_leaves_idx) {
+        const auto &leaf = getNode(list_idx, leaf_idx);
+
+        int x_start = std::max(0, (int)(leaf.x - leaf.size / 2.f));
+        int x_end   = std::min(nx, (int)(leaf.x + leaf.size / 2.f));
+        int y_start = std::max(0, (int)(leaf.y - leaf.size / 2.f));
+        int y_end   = std::min(ny, (int)(leaf.y + leaf.size / 2.f));
+
+        for (int y = y_start; y < y_end; ++y) {
+            for (int x = x_start; x < x_end; ++x) {
+                leaf_table[list_idx][IX(x, y)] = leaf_idx;
+            }
+        }
+    }
 }
 
 void QTSimulator::cacheNeighbors(int list_idx) {
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(list_idx, leaf_idx);
 
@@ -1070,8 +1175,15 @@ void QTSimulator::getNeighbors(
 int QTSimulator::getNodeIdxAt(
     float x, float y, int list_idx, int node_idx
 ) const {
+
     if (x < 0 || x > nx || y < 0 || y > ny)
         return -1;
+
+    if (!leaf_table[list_idx].empty()) {
+        int ix = std::clamp((int)x, 0, nx - 1);
+        int iy = std::clamp((int)y, 0, ny - 1);
+        return leaf_table[list_idx][IX(ix, iy)];
+    }
 
     auto &node = getNode(list_idx, node_idx);
     if (node.is_leaf)
@@ -1098,7 +1210,11 @@ void QTSimulator::getNodesIdxIn(
     float search_radius_2 = center.size * radius_ratio;
     search_radius_2 *= search_radius_2;
 
-    center.known = true;
+    thread_local std::vector<uint8_t> visited;
+    if (visited.size() < node_pool[root_list].size())
+        visited.resize(node_pool[root_list].size(), false);
+
+    visited[center_idx] = true;
     nodes_idx.push_back(center_idx);
 
     int read_head = 0;
@@ -1112,20 +1228,19 @@ void QTSimulator::getNodesIdxIn(
             int node_idx = neighbors_idx[i];
             auto &node   = getNode(root_list, node_idx);
 
-            if (node.known)
+            if (visited[node_idx])
                 continue;
 
             float dist = distance2(node.x, node.y, x, y);
             if (dist <= search_radius_2) {
-                node.known = true;
+                visited[node_idx] = true;
                 nodes_idx.push_back(node_idx);
             }
         }
     }
 
-    for (int idx : nodes_idx) {
-        getNode(root_list, idx).known = false;
-    }
+    for (int idx : nodes_idx)
+        visited[idx] = false;
 }
 
 InterpolatedData
@@ -1161,7 +1276,9 @@ Particle QTSimulator::nearestParticle(float x, float y, float radius) {
             if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
                 continue;
 
-            for (int idx : particle_idx[IX(ni, nj)]) {
+            int cell_idx = IX(ni, nj);
+            for (int idx = phash_head[cell_idx]; idx != -1;
+                 idx     = phash_next[idx]) {
                 auto &p = particles[idx];
 
                 float tmp_dis = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
@@ -1189,7 +1306,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     if (opts == OPT_NONE)
         return result;
 
-    static std::vector<int> nodes_to_process;
+    thread_local std::vector<int> nodes_to_process;
     getNodesIdxIn(x, y, 3.f, nodes_to_process);
     if (nodes_to_process.empty())
         return result;
@@ -1198,7 +1315,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     // 1. 細胞中心變數插值 (S, phi)
     // ==========================================================
     if (opts & OPT_CELL_ALL) {
-        static std::vector<MLSSamplePoint> cell_points;
+        thread_local std::vector<MLSSamplePoint> cell_points;
         cell_points.clear();
 
         for (int n_idx : nodes_to_process) {
@@ -1213,10 +1330,10 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     // 2. u 速度插值 (垂直邊上的速度)
     // ==========================================================
     if (opts & OPT_U_ALL) {
-        static std::vector<MLSSamplePoint> u_samples;
-        static std::vector<int> visited_u_faces;
+        thread_local std::vector<MLSSamplePoint> u_samples;
+        thread_local std::vector<bool> visited_u_faces;
         u_samples.clear();
-        visited_u_faces.clear();
+        visited_u_faces.assign(QTu.size(), 0);
 
         for (int n_idx : nodes_to_process) {
             auto &n = getNode(root_list, n_idx);
@@ -1236,10 +1353,10 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     // 3. v 速度插值 (水平邊上的速度)
     // ==========================================================
     if (opts & OPT_V_ALL) {
-        static std::vector<MLSSamplePoint> v_samples;
-        static std::vector<int> visited_v_faces;
+        thread_local std::vector<MLSSamplePoint> v_samples;
+        thread_local std::vector<bool> visited_v_faces;
         v_samples.clear();
-        visited_v_faces.clear();
+        visited_v_faces.assign(QTv.size(), 0);
 
         for (int n_idx : nodes_to_process) {
             auto &n         = getNode(root_list, n_idx);
@@ -1344,17 +1461,16 @@ void QTSimulator::MLSMirrorNode(
 
 void QTSimulator::MLSMirrorEdge(
     std::vector<MLSSamplePoint> &sample_points,
-    std::vector<int> &visited_faces,
+    std::vector<bool> &visited_faces,
     int face_idx,
     std::vector<QuadtreeEdge> &field,
     bool is_u
 ) {
     if (face_idx == -1)
         return;
-    if (std::find(visited_faces.begin(), visited_faces.end(), face_idx) !=
-        visited_faces.end())
+    if (visited_faces[face_idx])
         return;
-    visited_faces.push_back(face_idx);
+    visited_faces[face_idx] = 1;
 
     float min_x = 0.0f;
     float max_x = nx;

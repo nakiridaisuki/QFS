@@ -14,6 +14,26 @@ class FluidRenderer {
     Texture2D texture;
     Color *pixels;
 
+    bool showGrid     = true;
+    bool showPhi      = false;
+    bool showParticle = false;
+    bool showVelocity = false;
+
+    void
+    DrawVectorArrow(Vector2 start, Vector2 velocity, float scale, Color color) {
+        float speedSq = velocity.x * velocity.x + velocity.y * velocity.y;
+        if (speedSq < 1e-4f)
+            return; // 忽略接近 0 的極小速度
+
+        // 計算箭頭終點
+        Vector2 end = {
+            start.x + velocity.x * scale, start.y + velocity.y * scale
+        };
+
+        // 1. 繪製箭頭主幹
+        DrawLineEx(start, end, 1.f, color);
+    }
+
   public:
     FluidRenderer(const BaseSimulator &sim, int screenW, int screenH)
         : sim(sim), screenWidth(screenW), screenHeight(screenH) {
@@ -35,9 +55,12 @@ class FluidRenderer {
         delete[] pixels;
     }
 
-    void draw(
-        bool showGrid = false, bool showParticle = false, bool showPhi = false
-    ) {
+    bool &getShowPhi() { return showPhi; }
+    bool &getShowGrid() { return showGrid; }
+    bool &getShowParticle() { return showParticle; }
+    bool &getShowVelocity() { return showVelocity; }
+
+    void draw() {
         int nx = sim.getWidth();
         int ny = sim.getHeight();
 
@@ -64,10 +87,13 @@ class FluidRenderer {
         float scaleX = (float)screenWidth / nx;
         float scaleY = (float)screenHeight / ny;
 
-        if (showPhi) {
-            try {
-                const QTSimulator &qt_sim =
-                    dynamic_cast<const QTSimulator &>(sim);
+        try {
+            const QTSimulator &qt_sim = dynamic_cast<const QTSimulator &>(sim);
+
+            if (showPhi) {
+                const float gamma   = 2.2f;
+                const float max_val = (float)nx / 2.f;
+
                 for (int j = 0; j < ny; j++) {
                     for (int i = 0; i < nx; i++) {
                         int idx = i + j * nx;
@@ -76,9 +102,12 @@ class FluidRenderer {
                                 .phi;
 
                         Color color;
-                        float fraction = 1.f - (std::abs(phi) / (float)nx);
+                        float fraction =
+                            1.f - std::clamp(std::abs(phi) / max_val, 0.f, 1.f);
+                        float gamma_fraction = std::pow(fraction, gamma);
+
                         unsigned char value =
-                            std::clamp(int(fraction * 255), 0, 255);
+                            std::clamp(int(fraction * 255.f), 0, 255);
                         if (phi <= 0.f)
                             color = Color{0, value, 0, 255};
                         else
@@ -94,9 +123,28 @@ class FluidRenderer {
                     0, 0, (float)screenWidth, (float)screenHeight
                 };
                 DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
-            } catch (const std::bad_cast &e) {
-                std::cout << "Cast failed: " << e.what() << std::endl;
             }
+
+            if (showVelocity) {
+                auto &ufield     = qt_sim.getUVs(true);
+                float velo_scale = 0.1f;
+                for (auto &e : ufield) {
+                    float px = e.x * scaleX;
+                    float py = e.y * scaleY;
+
+                    DrawVectorArrow({px, py}, {e.val, 0}, velo_scale, GREEN);
+                }
+
+                auto &vfield = qt_sim.getUVs(false);
+                for (auto &e : vfield) {
+                    float px = e.x * scaleX;
+                    float py = e.y * scaleY;
+
+                    DrawVectorArrow({px, py}, {0, e.val}, velo_scale, GREEN);
+                }
+            }
+        } catch (const std::bad_cast &e) {
+            std::cout << "Cast failed: " << e.what() << std::endl;
         }
 
         if (showGrid) {

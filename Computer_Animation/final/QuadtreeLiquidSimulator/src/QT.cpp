@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <math.h>
 #include <omp.h>
 #include <queue>
@@ -124,7 +125,6 @@ void QTSimulator::update(float dt) {
     QTv = QTv_new;
 
     particleToGrid();
-    particleSurfaceToGrid();
 
     for (auto &face : QTu)
         face.val_old = face.val;
@@ -137,13 +137,18 @@ void QTSimulator::update(float dt) {
     QTproject();
     setBoundaries();
 
+    velExtrapolation();
+
     gridToParticle();
     advectParticles(dt);
+
+    redistancing();
     resampleParticles();
 
-    // // Redistance
+    // Redistance
     updateParticleIdx();
-    redistancing();
+    // reconstructSurface();
+    // redistancing();
 }
 
 void QTSimulator::setBoundaries() {
@@ -290,7 +295,8 @@ void QTSimulator::recursiveBuildTree(float dt, int list_idx, int node_idx) {
     float exp_phi = advected_data.phi;
     float exp_S   = data.S;
 
-    if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
+    // if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
+    if (std::abs(exp_phi) < node.size) {
         subdivideNode(list_idx, node_idx);
 
         for (int i = 0; i < 4; i++) {
@@ -511,30 +517,6 @@ void QTSimulator::particleToGrid() {
         updateFace(QTv[i], false);
 }
 
-void QTSimulator::particleSurfaceToGrid() {
-    /*
-     * For all leaves.
-     * reconstruct the surface by particles
-     */
-
-#pragma omp parallel for
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(root_list, leaf_idx);
-        if (leaf.size < 1.5f && leaf.phi < leaf.size) {
-            auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
-            if (nearest_p.x != 1e6) {
-                float dist = std::sqrt(
-                    (nearest_p.x - leaf.x) * (nearest_p.x - leaf.x) +
-                    ((nearest_p.y - leaf.y) * (nearest_p.y - leaf.y))
-                );
-
-                // if (dist < 0.f)
-                leaf.phi = std::min(leaf.phi, dist);
-            }
-        }
-    }
-}
-
 void QTSimulator::QTapplyGravity(float dt) {
     /*
      * For all edges.
@@ -680,6 +662,59 @@ void QTSimulator::QTproject() {
         updateFace(face);
 }
 
+void QTSimulator::velExtrapolation() {
+
+    std::queue<std::pair<int, int>> Q;
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+
+        if (leaf.phi < 0) {
+            leaf.known = true;
+            if (leaf.size < 1.5f)
+                Q.push({leaf_idx, 0});
+        }
+    }
+
+    if (Q.empty()) {
+        return;
+    }
+
+    while (!Q.empty()) {
+        auto [curr_node_idx, curr_dist] = Q.front();
+        Q.pop();
+
+        auto &curr_node = getNode(root_list, curr_node_idx);
+
+        int idx = 0;
+        for (int dir = 0; dir < 4; dir++) {
+            for (int i = 0; i < curr_node.neighbor_cnt[dir]; i++) {
+                int neighbor_idx = curr_node.cached_neighbors_idx[idx + i];
+                auto &neighbor   = getNode(root_list, neighbor_idx);
+
+                int dist = curr_dist + 1;
+                if (neighbor.known || dist > 4)
+                    continue;
+
+                if (dir != 0)
+                    QTu[neighbor.ur_id].val = QTu[curr_node.ur_id].val;
+                if (dir != 1)
+                    QTv[neighbor.vr_id].val = QTv[curr_node.vr_id].val;
+                if (dir != 2)
+                    QTu[neighbor.ul_id].val = QTu[curr_node.ul_id].val;
+                if (dir != 3)
+                    QTv[neighbor.vl_id].val = QTv[curr_node.vl_id].val;
+                Q.push({neighbor_idx, dist});
+                neighbor.known = true;
+            }
+            idx += curr_node.neighbor_cnt[dir];
+        }
+    }
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+        leaf.known = false;
+    }
+}
+
 void QTSimulator::gridToParticle() {
     /*
      * For all particles
@@ -750,7 +785,7 @@ void QTSimulator::resampleParticles() {
             if (node.phi < -3.f * node.size)
                 return true;
 
-            node.has_particle = true;
+            node.particle_cnt++;
             return false;
         });
     particles.erase(new_end, particles.end());
@@ -767,18 +802,43 @@ void QTSimulator::resampleParticles() {
         thread_local std::mt19937 gen(std::random_device{}());
         std::uniform_real_distribution<float> dis(-0.5f, 0.5f);
 
+        const int target_ppc = 4;
+
 #pragma omp for
         for (int leaf_idx : cached_leaves_idx) {
             auto &leaf = getNode(root_list, leaf_idx);
             if (leaf.phi < 0 &&
                 leaf.size < 1.5f &&
-                leaf.phi > -leaf.size &&
-                !leaf.has_particle) {
+                leaf.phi > -3.f * leaf.size &&
+                leaf.particle_cnt < target_ppc) {
 
-                float px  = leaf.x + dis(gen) * leaf.size;
-                float py  = leaf.y + dis(gen) * leaf.size;
-                auto data = MLSinterpolate(px, py, OPT_VEL_ALL);
-                local_p.push_back({px, py, data.u, data.v});
+                int num_to_seed = target_ppc - leaf.particle_cnt;
+
+                int seeded = 0;
+                int tries  = 0;
+                // 使用限制次數的嘗試，確保粒子能精準落在等值面內部
+                while (seeded < num_to_seed && tries < 15) {
+                    tries++;
+                    float px = leaf.x + dis(gen) * leaf.size;
+                    float py = leaf.y + dis(gen) * leaf.size;
+
+                    // 關鍵修改：插值得到該候選點的精準 phi 值
+                    auto phi_data = MLSinterpolate(px, py, OPT_PHI);
+
+                    // 只有當該位置確實位於流體內部（保留一點安全邊界，例如 -0.1
+                    // * size）才允許生成
+                    if (phi_data.phi < -0.1f * leaf.size) {
+                        auto vel_data = MLSinterpolate(px, py, OPT_VEL_ALL);
+                        local_p.push_back({px, py, vel_data.u, vel_data.v});
+                        seeded++;
+                    }
+                }
+                // for (int k = 0; k < num_to_seed; k++) {
+                //     float px      = leaf.x + dis(gen) * leaf.size;
+                //     float py      = leaf.y + dis(gen) * leaf.size;
+                //     auto vel_data = MLSinterpolate(px, py, OPT_VEL_ALL);
+                //     local_p.push_back({px, py, vel_data.u, vel_data.v});
+                // }
             }
         }
     }
@@ -807,6 +867,36 @@ void QTSimulator::updateParticleIdx() {
     }
 }
 
+void QTSimulator::reconstructSurface() {
+#pragma omp parallel for
+    for (int i = 0; i < cached_leaves_idx.size(); i++) {
+        int leaf_idx = cached_leaves_idx[i];
+        auto &leaf   = getNode(root_list, leaf_idx);
+
+        // 僅在最細的網格層級（FLIP 粒子存在的區域）進行重建
+        if (leaf.size > 1.5f || leaf.phi < 0)
+            continue;
+
+        float min_dist = nearestParticleDistance(leaf.x, leaf.y);
+
+        if (min_dist != std::numeric_limits<float>::infinity()) {
+            leaf.phi = min_dist;
+            // float phi_p = min_dist - particle_radius;
+            //
+            // if (leaf.phi > 0 && phi_p < 0) {
+            //     // 1. 水花細節：網格原本判定為空氣（phi >
+            //     // 0），但周圍有飛散的粒子。 這裡我們強迫網格認可粒子，將 phi
+            //     // 改為負值，使其在物理與視覺上被當作水。
+            //     leaf.phi = phi_p;
+            // } else if (leaf.phi < 0) {
+            //     // 2. 體積保持：在液體內部，結合粒子與網格的
+            //     // SDF（取聯集，避免耗散萎縮）。
+            //     leaf.phi = std::min(leaf.phi, phi_p);
+            // }
+        }
+    }
+}
+
 void QTSimulator::redistancing() {
     /*
      * For all leaves.
@@ -815,70 +905,148 @@ void QTSimulator::redistancing() {
 
     using PQElement = std::pair<float, int>; // {abs_phi, node_idx}
 
-    int max_threads    = omp_get_max_threads();
-    int total_elements = 0;
-    static std::vector<std::vector<PQElement>> thread_elements(max_threads);
-
-#pragma omp parallel
-    {
-        int tid       = omp_get_thread_num();
-        auto &local_e = thread_elements[tid];
-        local_e.clear();
-
-#pragma omp for
-        for (int leaf_idx : cached_leaves_idx) {
-            auto &leaf = getNode(root_list, leaf_idx);
-            if (std::abs(leaf.phi) < leaf.size * 1.5f) {
-
-                if (leaf.size < 1.5f) {
-                    auto nearest_p = nearestParticle(leaf.x, leaf.y, 2.f);
-
-                    if (nearest_p.x == 1e6 || nearest_p.y == 1e6) {
-                        leaf.phi_new = std::numeric_limits<float>::infinity();
-                        continue;
-                    }
-
-                    float dist = std::sqrt(
-                        (leaf.x - nearest_p.x) * (leaf.x - nearest_p.x) +
-                        (leaf.y - nearest_p.y) * (leaf.y - nearest_p.y)
-                    );
-                    dist -= particle_radius;
-
-                    leaf.phi = std::min(leaf.phi, dist);
-                }
-                leaf.phi_new = leaf.phi;
-                local_e.push_back({std::abs(leaf.phi_new), leaf_idx});
-            } else {
-                leaf.phi_new = std::numeric_limits<float>::infinity();
-            }
-        }
-
-#pragma omp atomic
-        total_elements += local_e.size();
-    }
-
     std::vector<PQElement> init_elements;
-    init_elements.reserve(total_elements);
-    for (const auto &local_elems : thread_elements)
-        init_elements.insert(
-            init_elements.end(), local_elems.begin(), local_elems.end()
-        );
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+
+        float abs_leaf_phi = std::abs(leaf.phi);
+
+        for (int i = 0; i < leaf.cached_neighbors_cnt; i++) {
+            int neigh_idx = leaf.cached_neighbors_idx[i];
+            auto &neigh   = getNode(root_list, neigh_idx);
+
+            if ((leaf.phi < 0.f) == (neigh.phi < 0.f))
+                continue;
+
+            float demon = abs_leaf_phi + std::abs(neigh.phi);
+            if (demon < 1e-6)
+                continue;
+
+            float theta = abs_leaf_phi / demon;
+            float L     = (leaf.size + neigh.size) * 0.5f;
+
+            leaf.phi_new = std::min(leaf.phi_new, theta * L);
+            leaf.known   = true;
+
+            neigh.phi_new = std::min(neigh.phi_new, (1.f - theta) * L);
+            neigh.known   = true;
+        }
+    }
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(root_list, leaf_idx);
+
+        float sign = (leaf.phi < 0 ? -1 : 1);
+        if (leaf.known) {
+            init_elements.push_back({std::abs(leaf.phi_new), leaf_idx});
+            leaf.phi_new *= sign;
+        } else
+            leaf.phi_new = std::numeric_limits<float>::infinity();
+
+        leaf.known = false;
+    }
 
     if (init_elements.empty()) {
         return;
     }
 
+    FMMSolver(init_elements);
+}
+
+void QTSimulator::FMMSolver(std::vector<std::pair<float, int>> &init_datas) {
+    auto get_axis = [](const QuadtreeNode &a, const QuadtreeNode &b) {
+        float dx = std::abs(a.x - b.x);
+        float dy = std::abs(a.y - b.y);
+        if (dx > dy)
+            return 0; // x 軸相鄰
+        return 1;     // y 軸相鄰
+    };
+
+    auto solve_eikonal_2d = [](float u1, float h1, float u2, float h2) {
+        float inv_h1_sq = 1.0f / (h1 * h1);
+        float inv_h2_sq = 1.0f / (h2 * h2);
+
+        float A = inv_h1_sq + inv_h2_sq;
+        float B = -2.0f * (u1 * inv_h1_sq + u2 * inv_h2_sq);
+        float C = (u1 * u1 * inv_h1_sq) + (u2 * u2 * inv_h2_sq) - 1.0f;
+
+        float disc = B * B - 4.0f * A * C;
+        if (disc < 0.0f)
+            return std::min(u1 + h1, u2 + h2); // 數值異常時退化為 1D
+        return (-B + std::sqrt(disc)) / (2.0f * A);
+    };
+
+    auto calculate_new_abs_phi = [&](const QuadtreeNode &neighbor) {
+        struct ActiveNeighbor {
+            float u = std::numeric_limits<float>::infinity();
+            float h = 0.0f;
+        };
+        ActiveNeighbor axis_data[3]; // 0: x, 1: y, 2: z
+
+        for (int i = 0; i < neighbor.cached_neighbors_cnt; i++) {
+            int neigh_idx     = neighbor.cached_neighbors_idx[i];
+            auto &neigh_neigh = getNode(root_list, neigh_idx);
+            if (!neigh_neigh.known)
+                continue; // 只使用已確定的鄰居
+
+            float u_cand = std::abs(neigh_neigh.phi_new);
+            float h_cand = 0.5f * (neighbor.size +
+                                   neigh_neigh.size); // 考慮八叉樹不同網格大小
+            int axis     = get_axis(neighbor, neigh_neigh);
+
+            if (u_cand < axis_data[axis].u) {
+                axis_data[axis].u = u_cand;
+                axis_data[axis].h = h_cand;
+            }
+        }
+
+        // 收集有有效已知鄰居的軸向
+        struct AxisInfo {
+            float u, h;
+        };
+        std::vector<AxisInfo> active_axes;
+        for (int i = 0; i < 3; i++) {
+            if (axis_data[i].u != std::numeric_limits<float>::infinity()) {
+                active_axes.push_back({axis_data[i].u, axis_data[i].h});
+            }
+        }
+
+        if (active_axes.empty())
+            return std::numeric_limits<float>::infinity();
+
+        // 依距離由小到大排序 (確保滿足因果關係 $u > u_i$)
+        std::sort(
+            active_axes.begin(),
+            active_axes.end(),
+            [](const AxisInfo &a, const AxisInfo &b) { return a.u < b.u; }
+        );
+
+        // 1D 嘗試
+        float u = active_axes[0].u + active_axes[0].h;
+
+        // 2D 嘗試
+        if (active_axes.size() >= 2 && u > active_axes[1].u) {
+            u = solve_eikonal_2d(
+                active_axes[0].u,
+                active_axes[0].h,
+                active_axes[1].u,
+                active_axes[1].h
+            );
+        }
+        return u;
+    };
+
+    using PQElement = std::pair<float, int>; // {abs_phi, node_idx}
     std::priority_queue<
         PQElement,
         std::vector<PQElement>,
         std::greater<PQElement>>
-        pq(std::greater<PQElement>(), std::move(init_elements));
+        pq(std::greater<PQElement>(), std::move(init_datas));
 
     while (!pq.empty()) {
         auto [curr_abs_phi, curr_node_idx] = pq.top();
-        auto &curr_node                    = getNode(root_list, curr_node_idx);
         pq.pop();
 
+        auto &curr_node = getNode(root_list, curr_node_idx);
         if (curr_node.known)
             continue;
         curr_node.known = true;
@@ -886,16 +1054,16 @@ void QTSimulator::redistancing() {
         for (int i = 0; i < curr_node.cached_neighbors_cnt; i++) {
             int neighbor_idx = curr_node.cached_neighbors_idx[i];
             auto &neighbor   = getNode(root_list, neighbor_idx);
-            float dist       = std::sqrt(
-                distance2(curr_node.x, curr_node.y, neighbor.x, neighbor.y)
-            );
-            dist = neighbor.phi < 0 ? -dist : dist;
 
-            float proposed_phi_new = curr_node.phi_new + dist;
+            if (neighbor.known)
+                continue;
 
-            if (std::abs(proposed_phi_new) < std::abs(neighbor.phi_new)) {
-                neighbor.phi_new = proposed_phi_new;
-                pq.push({std::abs(neighbor.phi_new), neighbor_idx});
+            float new_abs_phi = calculate_new_abs_phi(neighbor);
+
+            if (new_abs_phi < std::abs(neighbor.phi_new)) {
+                float sign       = (neighbor.phi < 0.f ? -1.f : 1.f);
+                neighbor.phi_new = sign * new_abs_phi;
+                pq.push({new_abs_phi, neighbor_idx});
             }
         }
     }
@@ -1011,7 +1179,8 @@ void QTSimulator::recursiveUpdatePhi(
 
     float node_x, node_y;
     float new_phi, node_phi, node_size;
-    bool node_is_leaf, node_has_particle;
+    bool node_is_leaf;
+    int node_particle_cnt;
     {
         auto &node = getNode(list_idx, node_idx);
         new_phi    = circleSDF(cx, cy, radius, node.x, node.y);
@@ -1026,7 +1195,7 @@ void QTSimulator::recursiveUpdatePhi(
         node_size         = node.size;
         node_phi          = node.phi;
         node_is_leaf      = node.is_leaf;
-        node_has_particle = node.has_particle;
+        node_particle_cnt = node.particle_cnt;
     }
 
     if (!node_is_leaf) {
@@ -1042,7 +1211,7 @@ void QTSimulator::recursiveUpdatePhi(
         return;
     }
 
-    if (node_size >= 1.5f && std::abs(node_phi) < node_size) {
+    if (node_size > 1.f && std::abs(node_phi) < node_size) {
         subdivideNode(list_idx, node_idx);
         for (int i = 0; i < 4; i++)
             recursiveUpdatePhi(
@@ -1054,7 +1223,7 @@ void QTSimulator::recursiveUpdatePhi(
                 getNode(list_idx, node_idx).children_idx[i]
             );
     }
-    if (node_size < 1.5f && node_phi < 0 && !node_has_particle) {
+    if (node_size < 1.5f && node_phi < 0 && node_particle_cnt == 0) {
         particles.push_back({node_x, node_y});
     }
 }
@@ -1263,14 +1432,13 @@ float QTSimulator::getVelocity(std::vector<QuadtreeEdge> &field, int id) {
     return field[id].val;
 }
 
-Particle QTSimulator::nearestParticle(float x, float y, float radius) {
+float QTSimulator::nearestParticleDistance(float x, float y) {
     int ix = std::clamp((int)x, 0, nx - 1);
     int iy = std::clamp((int)y, 0, ny - 1);
 
-    Particle result{1e6, 1e6};
-    float min_dis = 1e6;
-    for (int j = -radius; j <= radius; j++) {
-        for (int i = -radius; i <= radius; i++) {
+    float min_dis = std::numeric_limits<float>::infinity();
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
             int ni = ix + i, nj = iy + j;
 
             if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
@@ -1281,15 +1449,12 @@ Particle QTSimulator::nearestParticle(float x, float y, float radius) {
                  idx     = phash_next[idx]) {
                 auto &p = particles[idx];
 
-                float tmp_dis = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
-                if (tmp_dis < min_dis) {
-                    min_dis = tmp_dis;
-                    result  = p;
-                }
+                float d = distance2(p.x, p.y, x, y);
+                min_dis = std::min(min_dis, d);
             }
         }
     }
-    return result;
+    return std::sqrt(min_dis);
 }
 
 float QTSimulator::distance2(float x1, float y1, float x2, float y2) {

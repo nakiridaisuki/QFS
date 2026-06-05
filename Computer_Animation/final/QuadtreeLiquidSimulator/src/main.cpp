@@ -10,7 +10,7 @@
 int main() {
     const int screenWidth  = 1000;
     const int screenHeight = 1000;
-    const int simWidth     = 256;
+    const int simWidth     = 128;
     const int simHeight    = simWidth;
     const int FPS          = 60;
 
@@ -36,9 +36,6 @@ int main() {
     int iterations    = 1;
     float speed       = 1.f;
     int frame_cnt     = 0;
-    bool showGrid     = true;
-    bool showParticle = false;
-    bool showPhi      = false;
     // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
     Rectangle uiPanelRec = {10, 60, 260, 150};
 
@@ -90,7 +87,7 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        renderer.draw(showGrid, showParticle, showPhi);
+        renderer.draw();
 
         // 畫一點基本的文字
         DrawText(
@@ -155,9 +152,22 @@ int main() {
             sim.setGravity(gravity);
             sim.setSigma(tension);
 
-            GuiCheckBox(Rectangle{10, 170, 20, 20}, "Particles", &showParticle);
-            GuiCheckBox(Rectangle{10, 190, 20, 20}, "Grid", &showGrid);
-            GuiCheckBox(Rectangle{110, 170, 20, 20}, "Phi", &showPhi);
+            GuiCheckBox(
+                Rectangle{10, 170, 20, 20},
+                "Particles",
+                &renderer.getShowParticle()
+            );
+            GuiCheckBox(
+                Rectangle{10, 190, 20, 20}, "Grid", &renderer.getShowGrid()
+            );
+            GuiCheckBox(
+                Rectangle{110, 170, 20, 20}, "Phi", &renderer.getShowPhi()
+            );
+            GuiCheckBox(
+                Rectangle{110, 190, 20, 20},
+                "Velocity",
+                &renderer.getShowVelocity()
+            );
 
             // 把 Reset 按鈕稍微往下挪
             if (GuiButton(Rectangle{100, 215, 120, 30}, "Reset Fluid")) {

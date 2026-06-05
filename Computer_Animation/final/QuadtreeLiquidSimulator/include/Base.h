@@ -13,10 +13,10 @@ struct Line {
 
 class BaseSimulator {
   public:
-    virtual ~BaseSimulator() = default;
-    virtual int getWidth() const = 0;
-    virtual int getHeight() const = 0;
+    virtual ~BaseSimulator()                                  = default;
+    virtual int getWidth() const                              = 0;
+    virtual int getHeight() const                             = 0;
     virtual const std::vector<Particle> &getParticles() const = 0;
-    virtual std::vector<Line> getLines() const = 0;
-    virtual bool is_water(int x, int y) const = 0;
+    virtual std::vector<Line> getLines() const                = 0;
+    virtual bool is_water(int x, int y) const                 = 0;
 };

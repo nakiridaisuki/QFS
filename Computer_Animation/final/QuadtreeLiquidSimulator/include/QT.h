@@ -5,6 +5,8 @@
 #include <Eigen/Sparse>
 #include <cstdint>
 #include <limits>
+#include <queue>
+#include <utility>
 #include <vector>
 
 struct QuadtreeNode {
@@ -13,13 +15,14 @@ struct QuadtreeNode {
     float x, y, size;
     int depth;
 
-    bool is_leaf      = true;
-    bool known        = false;
-    bool has_particle = false;
+    bool is_leaf     = true;
+    bool known       = false;
+    int particle_cnt = 0;
     int children_idx[4];
 
     // signed distance to surface, < 0 if inter water
-    float phi = std::numeric_limits<float>::infinity(), phi_new;
+    float phi     = std::numeric_limits<float>::infinity();
+    float phi_new = std::numeric_limits<float>::infinity();
     // size function
     float S = 0.0f, S_new = 0.0f;
     int ul_id = -1, ur_id = -1, vl_id = -1, vr_id = -1;
@@ -76,7 +79,6 @@ class QTSimulator : public BaseSimulator {
     float G;     // Gravity const
     float Sigma; // surface tension
     float max_u, max_v;
-    float particle_radius = 0.5f;
 
     // QT grid data
     // u for row velocity
@@ -98,13 +100,14 @@ class QTSimulator : public BaseSimulator {
     void QTproject();
     void advectParticles(float dt);
     void particleToGrid();
-    void particleSurfaceToGrid();
     void gridToParticle();
+    void reconstructSurface();
     void resampleParticles();
     void redistancing();
     void findAllEdges(int list_idx);
     void advectQuadtreeDatas(float dt, int list_idx);
     void setBoundaries();
+    void velExtrapolation();
     void updateParticleIdx();
 
     // Quad Tree functions
@@ -150,7 +153,7 @@ class QTSimulator : public BaseSimulator {
     float getVelocity(std::vector<QuadtreeEdge> &field, int id);
     InterpolatedData
     advect(float x, float y, float dt, uint32_t opts = OPT_ALL);
-    Particle nearestParticle(float x, float y, float radius);
+    float nearestParticleDistance(float x, float y);
     int IX(int i, int j) const { return i + j * nx; }
     float circleSDF(float cx, float cy, float radius, float x, float y) {
         return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
@@ -167,6 +170,7 @@ class QTSimulator : public BaseSimulator {
     );
     std::pair<float, float>
     solveMLS(float x, float y, const std::vector<MLSSamplePoint> &samples);
+    void FMMSolver(std::vector<std::pair<float, int>> &init_datas);
 
   public:
     QTSimulator(int width, int height);
@@ -178,6 +182,12 @@ class QTSimulator : public BaseSimulator {
     // get functions for renderer
     int getWidth() const override { return nx; }
     int getHeight() const override { return ny; }
+    const std::vector<QuadtreeEdge> &getUVs(bool is_u = false) const {
+        if (is_u)
+            return QTu;
+        else
+            return QTv;
+    }
     const QuadtreeNode &getNodeAt(float x, float y) const {
         int idx = getNodeIdxAt(x, y, root_list);
         return getNode(root_list, idx);

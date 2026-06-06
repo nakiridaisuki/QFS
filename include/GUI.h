@@ -3,6 +3,7 @@
 #include "Base.h"
 #include "Renderer.h"
 #include "raygui.h"
+#include <string>
 #include <vector>
 
 namespace SimType {
@@ -41,7 +42,13 @@ class SimulatorUI {
     std::vector<PackedSliderElement> main_sliders;
     std::vector<PackedCheckBoxElement> debug_checkbox;
 
-    SimulatorUI(BaseSimulator *sim, FluidRenderer &renderer)
+    std::string resolution_data;
+
+    SimulatorUI(
+        BaseSimulator *sim,
+        FluidRenderer &renderer,
+        std::vector<int> resolutions
+    )
         : sim(sim), renderer(renderer) {
 
         // Define init value
@@ -58,6 +65,13 @@ class SimulatorUI {
         new_sim_size = 1;
         new_sim_type = 0;
         need_reset   = false;
+
+        resolution_data = "";
+        for (int i = 0; i < resolutions.size(); i++) {
+            if (i != 0)
+                resolution_data.push_back(';');
+            resolution_data += std::to_string(resolutions[i]);
+        }
 
         // Define main sliders
         main_sliders.push_back({"Brush Size", &brushRadius, 1.0f, 200.0f});
@@ -104,7 +118,9 @@ class SimulatorUI {
             updateY(curr_y, 20);
 
             GuiComboBox(
-                Rectangle{20, curr_y, 120, 20}, "64;128;256;512", &new_sim_size
+                Rectangle{20, curr_y, 120, 20},
+                resolution_data.c_str(),
+                &new_sim_size
             );
             updateY(curr_y, 20);
 

@@ -5,14 +5,17 @@
 #include "Renderer.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
 int main() {
     const int screenWidth  = 1000;
-    const int screenHeight = 1000;
+    const int screenHeight = screenWidth;
     const int FPS          = 60;
+
+    const std::vector<int> resolutions = {64, 128, 256, 512, 1024};
 
     int simWidth  = 128;
     int simHeight = simWidth;
@@ -26,7 +29,7 @@ int main() {
 
     BaseSimulator *sim = new MACSimulator(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
-    SimulatorUI gui(sim, renderer);
+    SimulatorUI gui(sim, renderer, resolutions);
 
     // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)
     GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
@@ -107,10 +110,9 @@ int main() {
                     sim->getWidth() / 2.0f, sim->getHeight() * 0.5f, 25.0f
                 );
             } else {
-                int sizes[] = {64, 128, 256, 512};
 
                 simType  = new_type;
-                simWidth = simHeight = sizes[new_size];
+                simWidth = simHeight = resolutions[new_size];
 
                 delete sim;
                 if (simType == SimType::MAC)

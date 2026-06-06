@@ -13,6 +13,7 @@ class MACSimulator : public BaseSimulator {
     // MAC grid data
     // u for row velocity
     // v for column velocity
+    // p for pressure
     std::vector<Particle> particle_place_holder; // just for Renderer
     std::vector<float> u, v, density;
     std::vector<float> u_old, v_old, density_old;
@@ -23,6 +24,12 @@ class MACSimulator : public BaseSimulator {
         Eigen::SparseMatrix<float>,
         Eigen::Lower | Eigen::Upper>
         solver;
+
+    // some local variables
+    std::vector<int> valid_u, valid_v;
+    std::vector<float> phi[2];
+    std::vector<float> nx_n, ny_n;
+    std::vector<float> kappa;
 
     // index calculator
     int IX(int i, int j) const { return i + j * nx; }

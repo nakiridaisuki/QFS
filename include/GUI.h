@@ -29,6 +29,7 @@ class SimulatorUI {
     float gravity;
     float tension;
     bool showUI;
+    bool showDebug;
     int iterations;
     float speed;
     int frame_cnt;
@@ -48,12 +49,13 @@ class SimulatorUI {
         gravity     = sim->getGravity();
         tension     = sim->getSurfaceTension();
         showUI      = true;
+        showDebug   = true;
         iterations  = 1;
         speed       = 1.f;
         frame_cnt   = 0;
         uiPanelRec  = {10, 60, 260, 150};
 
-        new_sim_size = 0;
+        new_sim_size = 1;
         new_sim_type = 0;
         need_reset   = false;
 
@@ -79,6 +81,7 @@ class SimulatorUI {
     void drawUI() {
         float curr_y = 60;
         GuiCheckBox(Rectangle{20, curr_y, 20, 20}, "Show UI", &showUI);
+        GuiCheckBox(Rectangle{120, curr_y, 20, 20}, "Show Debug", &showDebug);
         curr_y += 20 + global_y_gap;
 
         if (showUI) {
@@ -108,10 +111,12 @@ class SimulatorUI {
             GuiComboBox(
                 Rectangle{20, curr_y, 120, 20}, "MAC;Quadtree", &new_sim_type
             );
-            // curr_y = drawPackedCheckBoxes(20, curr_y, debug_checkbox);
-
             need_reset =
                 GuiButton(Rectangle{150, curr_y, 100, 20}, "Reset Fluid");
+            updateY(curr_y, 20);
+
+            if (showDebug)
+                curr_y = drawPackedCheckBoxes(20, curr_y, debug_checkbox);
         }
     }
 

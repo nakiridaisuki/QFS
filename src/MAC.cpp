@@ -1,6 +1,5 @@
 #include "MAC.h"
 #include <algorithm>
-#include <iostream>
 #include <math.h>
 #include <vector>
 
@@ -26,8 +25,6 @@ MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
     solver.setMaxIterations(80);
     solver.setTolerance(1e-3);
     Eigen::setNbThreads(6);
-
-    std::cout << "HI MAC" << std::endl;
 }
 
 void MACSimulator::update(float dt) {
@@ -95,16 +92,12 @@ void MACSimulator::setBoundaries(
     std::vector<float> &ufield, std::vector<float> &vfield
 ) {
     for (int j = 0; j < ny; j++) {
-        // if (ufield[IX_u(0, j)] < 0.f)
-        ufield[IX_u(0, j)] = 0.0;
-        // if (ufield[IX_u(nx, j)] > 0.f)
+        ufield[IX_u(0, j)]  = 0.0;
         ufield[IX_u(nx, j)] = 0.0;
     }
     for (int i = 0; i < nx; i++) {
-        if (vfield[IX_v(i, 0)] < 0.f)
-            vfield[IX_v(i, 0)] = 0.0;
-        if (vfield[IX_v(i, ny)] > 0.f)
-            vfield[IX_v(i, ny)] = 0.0;
+        vfield[IX_v(i, 0)]  = 0.0;
+        vfield[IX_v(i, ny)] = 0.0;
     }
 }
 
@@ -270,11 +263,19 @@ void MACSimulator::project() {
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
 
+    auto get_pressure = [&](int i, int j) {
+        int idx   = IX(i, j);
+        int f_idx = fluid_map[idx];
+        if (f_idx == -1)
+            return 0.0f;
+        return pressure[f_idx];
+    };
+
 #pragma omp parallel for
     for (int j = 0; j < ny; j++) {
         for (int i = 1; i < nx; i++) {
-            float p1 = pressure[fluid_map[IX(i, j)]];
-            float p2 = pressure[fluid_map[IX(i - 1, j)]];
+            float p1 = get_pressure(i, j);
+            float p2 = get_pressure(i - 1, j);
             u[IX_u(i, j)] -= (p1 - p2);
         }
     }
@@ -282,8 +283,8 @@ void MACSimulator::project() {
 #pragma omp parallel for
     for (int j = 1; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
-            float p1 = pressure[fluid_map[IX(i, j)]];
-            float p2 = pressure[fluid_map[IX(i, j - 1)]];
+            float p1 = get_pressure(i, j);
+            float p2 = get_pressure(i, j - 1);
             v[IX_v(i, j)] -= (p1 - p2);
         }
     }

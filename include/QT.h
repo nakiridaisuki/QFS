@@ -75,6 +75,10 @@ class QTSimulator : public BaseSimulator {
     std::vector<QuadtreeNode> node_pool[2];
     int nx, ny;
 
+    bool add_water = false;
+    bool del_water = false;
+    float water_x, water_y, water_radius;
+
     // QT grid data
     // u for row velocity
     // v for column velocity
@@ -118,14 +122,6 @@ class QTSimulator : public BaseSimulator {
     void recursiveGetLines(
         std::vector<Line> &lines, int list_idx, int node_idx = 0
     ) const;
-    void recursiveUpdatePhi(
-        float cx,
-        float cy,
-        float radius,
-        bool is_delete,
-        int list_idx,
-        int node_idx = 0
-    );
     void recursiveBuildTree(float dt, int list_idx, int node_idx = 0);
     void cacheNeighbors(int list_idx);
     void cacheLeaves(int list_idx);
@@ -144,8 +140,11 @@ class QTSimulator : public BaseSimulator {
     InterpolatedData
     advect(float x, float y, float dt, uint32_t opts = OPT_ALL);
     int IX(int i, int j) const { return i + j * nx; }
-    float circleSDF(float cx, float cy, float radius, float x, float y) {
-        return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
+    float circleSDF(float x, float y) {
+        return std::sqrt(
+                   (x - water_x) * (x - water_x) + (y - water_y) * (y - water_y)
+               ) -
+               water_radius;
     };
     InterpolatedData MLSinterpolate(float x, float y, uint32_t opts = OPT_ALL);
     void

@@ -23,7 +23,7 @@ QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
     Sigma = 0.0f;
 
     // solver.setMaxIterations(80);
-    // solver.setTolerance(1e-3);
+    solver.setTolerance(1e-3);
     // Eigen::setNbThreads(6);
 
     root_list = 0;
@@ -44,19 +44,16 @@ void QTSimulator::reset() {
 }
 
 void QTSimulator::addWater(float x, float y, float radius) {
-    recursiveUpdatePhi(x, y, radius, false, root_list);
-    leaf_table[root_list].clear();
-    smoothing(root_list);
-    cacheLeaves(root_list);
-    cacheNeighbors(root_list);
+    add_water    = true;
+    water_x      = x;
+    water_y      = y;
+    water_radius = radius;
 }
 void QTSimulator::delWater(float x, float y, float radius) {
-    float r2 = radius * radius;
-    recursiveUpdatePhi(x, y, radius, true, root_list);
-    leaf_table[root_list].clear();
-    smoothing(root_list);
-    cacheLeaves(root_list);
-    cacheNeighbors(root_list);
+    del_water    = true;
+    water_x      = x;
+    water_y      = y;
+    water_radius = radius;
 }
 
 void QTSimulator::recursiveGetLines(
@@ -89,9 +86,6 @@ std::vector<Line> QTSimulator::getLines() const {
 }
 
 void QTSimulator::update(float dt) {
-    max_u = 0.0f;
-    max_v = 0.0f;
-
     // Generate new Quad Tree
     computeSizingFunction(dt);
     propagateSizingFunction();
@@ -127,6 +121,9 @@ void QTSimulator::update(float dt) {
 
     velExtrapolation();
     redistancing();
+
+    add_water = false;
+    del_water = false;
 }
 
 void QTSimulator::setBoundaries() {
@@ -273,6 +270,15 @@ void QTSimulator::recursiveBuildTree(float dt, int list_idx, int node_idx) {
     float exp_phi = advected_data.phi;
     float exp_S   = data.S;
 
+    if (add_water || del_water) {
+        float water_phi = circleSDF(node.x, node.y);
+
+        if (add_water)
+            exp_phi = std::min(exp_phi, water_phi);
+        if (del_water)
+            exp_phi = std::max(exp_phi, -water_phi);
+    }
+
     // if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
     if (std::abs(exp_phi) < node.size) {
         subdivideNode(list_idx, node_idx);
@@ -418,7 +424,18 @@ void QTSimulator::advectQuadtreeDatas(float dt, int list_idx) {
         auto &leaf         = getNode(list_idx, leaf_idx);
         auto advected_leaf = advect(leaf.x, leaf.y, dt, OPT_CELL_ALL);
 
-        leaf.phi = advected_leaf.phi;
+        float exp_phi = advected_leaf.phi;
+
+        if (add_water || del_water) {
+            float water_phi = circleSDF(leaf.x, leaf.y);
+
+            if (add_water)
+                exp_phi = std::min(exp_phi, water_phi);
+            if (del_water)
+                exp_phi = std::max(exp_phi, -water_phi);
+        }
+
+        leaf.phi = exp_phi;
         leaf.S   = advected_leaf.S;
     }
 
@@ -842,8 +859,6 @@ void QTSimulator::subdivideNode(int list_idx, int node_idx) {
         child.ur_id = node.ur_id;
         child.vl_id = node.vl_id;
         child.vr_id = node.vr_id;
-        child.phi   = node.phi;
-        child.S     = node.S;
     }
 }
 
@@ -905,57 +920,6 @@ void QTSimulator::smoothing(int list_idx) {
                 }
             }
         }
-    }
-}
-
-void QTSimulator::recursiveUpdatePhi(
-    float cx, float cy, float radius, bool is_delete, int list_idx, int node_idx
-) {
-
-    float node_x, node_y;
-    float new_phi, node_phi, node_size;
-    bool node_is_leaf;
-    int node_particle_cnt;
-    {
-        auto &node = getNode(list_idx, node_idx);
-        new_phi    = circleSDF(cx, cy, radius, node.x, node.y);
-
-        if (is_delete && node.phi <= 0.f)
-            node.phi = std::max(node.phi, -new_phi);
-        else
-            node.phi = std::min(node.phi, new_phi);
-
-        node_x       = node.x;
-        node_y       = node.y;
-        node_size    = node.size;
-        node_phi     = node.phi;
-        node_is_leaf = node.is_leaf;
-    }
-
-    if (!node_is_leaf) {
-        for (int i = 0; i < 4; i++)
-            recursiveUpdatePhi(
-                cx,
-                cy,
-                radius,
-                is_delete,
-                list_idx,
-                getNode(list_idx, node_idx).children_idx[i]
-            );
-        return;
-    }
-
-    if (node_size > 1.f && std::abs(node_phi) < node_size) {
-        subdivideNode(list_idx, node_idx);
-        for (int i = 0; i < 4; i++)
-            recursiveUpdatePhi(
-                cx,
-                cy,
-                radius,
-                is_delete,
-                list_idx,
-                getNode(list_idx, node_idx).children_idx[i]
-            );
     }
 }
 
@@ -1145,11 +1109,11 @@ void QTSimulator::getNodesIdxIn(
 
 InterpolatedData
 QTSimulator::advect(float x, float y, float dt, uint32_t opts) {
-    auto current_data = MLSinterpolate(x, y, OPT_VEL_ALL);
     // float u_val = bilerp(u, nx + 1, ny, x, y);
     // float v_val = bilerp(v, nx, ny + 1, x, y);
-    float u_val = current_data.u;
-    float v_val = current_data.v;
+    auto current_data = MLSinterpolate(x, y, OPT_VEL_ALL);
+    float u_val       = current_data.u;
+    float v_val       = current_data.v;
 
     float past_x = std::clamp(x - u_val * dt, 0.0f, (float)nx);
     float past_y = std::clamp(y - v_val * dt, 0.0f, (float)ny);
@@ -1293,7 +1257,12 @@ void QTSimulator::MLSMirrorNode(
     float max_y = ny;
 
     auto &n = getNode(root_list, node_idx);
-    sample_points.push_back({n.x, n.y, n.size, n.S, n.phi});
+
+    float save_phi = n.phi;
+    if (std::isinf(save_phi))
+        save_phi = n.x + n.y;
+
+    sample_points.push_back({n.x, n.y, n.size, n.S, save_phi});
 
     // 檢查細胞邊界鏡像 (Mirroring)
     float dist_left   = n.x - min_x;
@@ -1323,11 +1292,11 @@ void QTSimulator::MLSMirrorNode(
     }
 
     if (mirror_x)
-        sample_points.push_back({mx, n.y, n.size, n.S, n.phi});
+        sample_points.push_back({mx, n.y, n.size, n.S, save_phi});
     if (mirror_y)
-        sample_points.push_back({n.x, my, n.size, n.S, n.phi});
+        sample_points.push_back({n.x, my, n.size, n.S, save_phi});
     if (mirror_x && mirror_y)
-        sample_points.push_back({mx, my, n.size, n.S, n.phi});
+        sample_points.push_back({mx, my, n.size, n.S, save_phi});
 }
 
 void QTSimulator::MLSMirrorEdge(

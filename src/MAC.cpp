@@ -1,6 +1,5 @@
 #include "MAC.h"
 #include <algorithm>
-#include <iostream>
 #include <math.h>
 #include <vector>
 
@@ -38,9 +37,6 @@ MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
 }
 
 void MACSimulator::update(float dt) {
-    max_u = 0.0f;
-    max_v = 0.0f;
-
     u_old       = u;
     v_old       = v;
     density_old = density;
@@ -302,9 +298,6 @@ void MACSimulator::project() {
 
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
-
-    std::cout << "實際疊代次數: " << solver.iterations()
-              << "，最終殘差 (Error): " << solver.error() << std::endl;
 
     auto get_pressure = [&](int i, int j) {
         int idx   = IX(i, j);

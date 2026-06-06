@@ -15,7 +15,6 @@ class BaseSimulator {
   protected:
     float G;     // Gravity const
     float Sigma; // surface tension
-    float max_u, max_v;
 
   public:
     virtual ~BaseSimulator()                                  = default;
@@ -27,7 +26,6 @@ class BaseSimulator {
     virtual void update(float dt)                             = 0;
 
     // get functions for main loop
-    float getMaxVel() { return std::max(max_u, max_v); }
     float getGravity() { return G; }
     float getSurfaceTension() { return Sigma; }
 

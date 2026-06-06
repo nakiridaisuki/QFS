@@ -38,7 +38,6 @@ int main() {
 
     // === UI 需要的參數變數 ===
     float &brushRadius = gui.brushRadius;
-    int &iterations    = gui.iterations;
     float &speed       = gui.speed;
     // 定義一塊 UI 區域，用來防止「點擊 UI 時不小心畫出流體」
 
@@ -72,18 +71,7 @@ int main() {
             }
 
             float frameTime = std::min(GetFrameTime(), 0.0333f);
-            float idel_dt;
-            if (sim->getMaxVel() == 0)
-                idel_dt = frameTime;
-            else
-                idel_dt = 1.f / sim->getMaxVel();
-            int idel_iter = std::ceil(frameTime / idel_dt);
-
-            int actual_iter = std::clamp(idel_iter, 1, iterations);
-            float actual_dt = frameTime / actual_iter;
-            for (int iter = 0; iter < actual_iter; iter++) {
-                sim->update(actual_dt);
-            }
+            sim->update(frameTime);
         }
 
         // 4. 渲染畫面與 UI
@@ -106,9 +94,6 @@ int main() {
             int new_type = gui.new_sim_type;
             if (new_size == simWidth && new_type == simType) {
                 sim->reset();
-                sim->addWater(
-                    sim->getWidth() / 2.0f, sim->getHeight() * 0.5f, 25.0f
-                );
             } else {
 
                 simType  = new_type;
@@ -122,10 +107,6 @@ int main() {
 
                 renderer.setSimulator(sim);
                 gui.setSimulator(sim);
-
-                sim->addWater(
-                    sim->getWidth() / 2.0f, sim->getHeight() * 0.5f, 25.0f
-                );
             }
             gui.need_reset = false;
         }

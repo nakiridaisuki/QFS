@@ -31,7 +31,6 @@ class SimulatorUI {
     float tension;
     bool showUI;
     bool showDebug;
-    int iterations;
     float speed;
     int frame_cnt;
     int new_sim_type; // 0: MAC, 1: QT
@@ -57,7 +56,6 @@ class SimulatorUI {
         tension     = sim->getSurfaceTension();
         showUI      = true;
         showDebug   = true;
-        iterations  = 1;
         speed       = 1.f;
         frame_cnt   = 0;
         uiPanelRec  = {10, 60, 260, 150};
@@ -106,16 +104,6 @@ class SimulatorUI {
 
             sim->setGravity(gravity);
             sim->setSigma(tension);
-
-            GuiSpinner(
-                Rectangle{120, curr_y, 120, 20},
-                "Max Iteration",
-                &iterations,
-                0,
-                10,
-                false
-            );
-            updateY(curr_y, 20);
 
             GuiComboBox(
                 Rectangle{20, curr_y, 120, 20},

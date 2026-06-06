@@ -3,23 +3,21 @@
 #include "Base.h"
 #include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <vector>
 
 class MACSimulator : public BaseSimulator {
   private:
     int nx, ny;
-    float G;     // Gravity const
-    float Sigma; // surface tension
-    float max_u, max_v;
 
     // MAC grid data
     // u for row velocity
     // v for column velocity
-    // p for pressure
-    std::vector<Particle> particles;
-    std::vector<float> u, v, p, u_old, v_old;
+    std::vector<Particle> particle_place_holder; // just for Renderer
+    std::vector<float> u, v, density;
+    std::vector<float> u_old, v_old, density_old;
     std::vector<float> weight_u, weight_v;
-    std::vector<int> cell_type, particles_count, current_count, fluid_map;
+    std::vector<int> cell_type, current_count, fluid_map;
     std::vector<Eigen::Triplet<float>> triplets;
     Eigen::ConjugateGradient<
         Eigen::SparseMatrix<float>,
@@ -32,18 +30,16 @@ class MACSimulator : public BaseSimulator {
     int IX_v(int i, int j) const { return i + j * nx; }
 
     // main simulation functions
-    void particleToGrid();
-    void gridToParticle();
-    void velExtrapolation();
-    void advectParticles(float dt);
+    void advectDatas(float dt);
     void applyGravity(float dt);
     void applySurfaceTension(float dt);
     void markFluidCells();
     void setBoundaries(std::vector<float> &ufield, std::vector<float> &vfield);
     void project();
-    void resampleParticles();
+    void velExtrapolation();
 
     // util functions
+    float distance2(float x1, float y1, float x2, float y2);
     float bilerp(
         const std::vector<float> &field, int w, int h, float x, float y
     ) const;
@@ -54,34 +50,27 @@ class MACSimulator : public BaseSimulator {
   public:
     MACSimulator(int width, int height);
 
-    void update(float dt);                         // update every frame
-    void addWater(float x, float y, float radius); // add water and dye
-    void delWater(float x, float y, float radius); // add water and dye
+    void update(float dt) override; // update every frame
+    void addWater(float x, float y, float radius) override;
+    void delWater(float x, float y, float radius) override;
 
     // get functions for renderer
     int getWidth() const override { return nx; }
     int getHeight() const override { return ny; }
     const std::vector<Particle> &getParticles() const override {
-        return particles;
+        return particle_place_holder;
     }
     std::vector<Line> getLines() const override;
     bool is_water(int x, int y) const override { return cell_type[IX(x, y)]; }
 
-    // get functions for main loop
-    float getGravity() { return G; }
-    float getSurfaceTension() { return Sigma; }
-    float getMaxVel() { return std::max(max_u, max_v); }
-
     // set functions
-    void setGravity(float gravity) { G = gravity; }
-    void setSigma(float sigma) { Sigma = sigma; }
-    void reset() {
-        particles.clear();
+    void reset() override {
         std::fill(u.begin(), u.end(), 0.0);
         std::fill(v.begin(), v.end(), 0.0);
         std::fill(u_old.begin(), u_old.end(), 0.0);
         std::fill(v_old.begin(), v_old.end(), 0.0);
-        std::fill(p.begin(), p.end(), 0.0);
+        std::fill(density.begin(), density.end(), 0.0);
+        std::fill(density_old.begin(), density_old.end(), 0.0);
         std::fill(cell_type.begin(), cell_type.end(), 0);
     }
 };

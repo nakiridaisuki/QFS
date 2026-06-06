@@ -5,7 +5,6 @@
 #include <Eigen/Sparse>
 #include <cstdint>
 #include <limits>
-#include <queue>
 #include <utility>
 #include <vector>
 
@@ -15,9 +14,8 @@ struct QuadtreeNode {
     float x, y, size;
     int depth;
 
-    bool is_leaf     = true;
-    bool known       = false;
-    int particle_cnt = 0;
+    bool is_leaf = true;
+    bool known   = false;
     int children_idx[4];
 
     // signed distance to surface, < 0 if inter water
@@ -76,14 +74,10 @@ class QTSimulator : public BaseSimulator {
     int root_list;
     std::vector<QuadtreeNode> node_pool[2];
     int nx, ny;
-    float G;     // Gravity const
-    float Sigma; // surface tension
-    float max_u, max_v;
 
     // QT grid data
     // u for row velocity
     // v for column velocity
-    std::vector<Particle> particles;
     std::vector<int> phash_head, phash_next;
     std::vector<int> cached_leaves_idx, leaf_table[2];
     std::vector<Eigen::Triplet<float>> QTtriplets;
@@ -93,22 +87,18 @@ class QTSimulator : public BaseSimulator {
         solver;
     std::vector<QuadtreeEdge> QTu, QTv, QTu_new, QTv_new;
 
+    std::vector<Particle> particle_place_holder; // just for Renderer
+
     // Quad Tree simulation functions
     void computeSizingFunction(float dt);
     void propagateSizingFunction();
     void QTapplyGravity(float dt);
     void QTproject();
-    void advectParticles(float dt);
-    void particleToGrid();
-    void gridToParticle();
-    void reconstructSurface();
-    void resampleParticles();
     void redistancing();
     void findAllEdges(int list_idx);
     void advectQuadtreeDatas(float dt, int list_idx);
     void setBoundaries();
     void velExtrapolation();
-    void updateParticleIdx();
 
     // Quad Tree functions
     int allocate(float x, float y, float size, int depth, int list_idx) {
@@ -153,7 +143,6 @@ class QTSimulator : public BaseSimulator {
     float getVelocity(std::vector<QuadtreeEdge> &field, int id);
     InterpolatedData
     advect(float x, float y, float dt, uint32_t opts = OPT_ALL);
-    float nearestParticleDistance(float x, float y);
     int IX(int i, int j) const { return i + j * nx; }
     float circleSDF(float cx, float cy, float radius, float x, float y) {
         return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) - radius;
@@ -175,9 +164,9 @@ class QTSimulator : public BaseSimulator {
   public:
     QTSimulator(int width, int height);
 
-    void update(float dt);                         // update every frame
-    void addWater(float x, float y, float radius); // add water and dye
-    void delWater(float x, float y, float radius); // add water and dye
+    void update(float dt) override; // update every frame
+    void addWater(float x, float y, float radius) override;
+    void delWater(float x, float y, float radius) override;
 
     // get functions for renderer
     int getWidth() const override { return nx; }
@@ -193,7 +182,7 @@ class QTSimulator : public BaseSimulator {
         return getNode(root_list, idx);
     };
     const std::vector<Particle> &getParticles() const override {
-        return particles;
+        return particle_place_holder;
     }
     std::vector<Line> getLines() const override;
     bool is_water(int x, int y) const override {
@@ -202,13 +191,6 @@ class QTSimulator : public BaseSimulator {
         return getNode(root_list, idx).phi <= 0;
     }
 
-    // get functions for main loop
-    float getGravity() { return G; }
-    float getSurfaceTension() { return Sigma; }
-    float getMaxVel() { return std::max(max_u, max_v); }
-
     // set functions
-    void setGravity(float gravity) { G = gravity; }
-    void setSigma(float sigma) { Sigma = sigma; }
-    void reset();
+    void reset() override;
 };

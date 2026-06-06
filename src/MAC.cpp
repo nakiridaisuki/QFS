@@ -1,6 +1,6 @@
 #include "MAC.h"
 #include <algorithm>
-#include <cstdlib>
+#include <iostream>
 #include <math.h>
 #include <vector>
 
@@ -13,30 +13,34 @@ MACSimulator::MACSimulator(int width, int height) : nx(width), ny(height) {
     weight_u.resize((nx + 1) * ny, 0.0);
     weight_v.resize(nx * (ny + 1), 0.0);
 
+    density.resize(nx * ny, 0);
+    density_old.resize(nx * ny, 0);
     cell_type.resize(nx * ny, 0);
-    particles_count.resize(nx * ny, 0);
     current_count.resize(nx * ny, 0);
     fluid_map.resize(nx * ny, 0);
     triplets.reserve(nx * ny * 5);
-    p.resize(nx * ny, 0.0);
+
     G     = 150.f;
     Sigma = 0.0f;
 
     solver.setMaxIterations(80);
     solver.setTolerance(1e-3);
     Eigen::setNbThreads(6);
+
+    std::cout << "HI MAC" << std::endl;
 }
 
 void MACSimulator::update(float dt) {
     max_u = 0.0f;
     max_v = 0.0f;
 
-    particleToGrid();
-
-    u_old = u;
-    v_old = v;
-
+    u_old       = u;
+    v_old       = v;
+    density_old = density;
     setBoundaries(u_old, v_old);
+
+    advectDatas(dt);
+    markFluidCells();
 
     applyGravity(dt);
     applySurfaceTension(dt);
@@ -46,33 +50,33 @@ void MACSimulator::update(float dt) {
     setBoundaries(u, v);
 
     velExtrapolation();
-
-    gridToParticle();
-
-    advectParticles(dt);
-    markFluidCells();
-    resampleParticles();
 }
 
 void MACSimulator::addWater(float x, float y, float radius) {
     float r2 = radius * radius;
-    for (float px = x - radius; px < x + radius; px += 0.5) {
-        for (float py = y - radius; py < y + radius; py += 0.5) {
-            if (((px - x) * (px - x) + (py - y) * (py - y)) < r2)
-                particles.push_back({px, py, 0.f, 0.f});
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float cx = i + 0.5f;
+            float cy = j + 0.5f;
+            if (distance2(cx, cy, x, y) < r2) {
+                density[IX(i, j)]   = 1.f;
+                cell_type[IX(i, j)] = 1;
+            }
         }
     }
 }
 void MACSimulator::delWater(float x, float y, float radius) {
     float r2 = radius * radius;
-
-    auto new_end =
-        std::remove_if(particles.begin(), particles.end(), [&](auto &p) {
-            return ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y)) < r2;
-        });
-
-    particles.erase(new_end, particles.end());
-    markFluidCells();
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float cx = i + 0.5f;
+            float cy = j + 0.5f;
+            if (distance2(cx, cy, x, y) < r2) {
+                density[IX(i, j)]   = 0.f;
+                cell_type[IX(i, j)] = 0;
+            }
+        }
+    }
 }
 
 std::vector<Line> MACSimulator::getLines() const {
@@ -101,31 +105,6 @@ void MACSimulator::setBoundaries(
             vfield[IX_v(i, 0)] = 0.0;
         if (vfield[IX_v(i, ny)] > 0.f)
             vfield[IX_v(i, ny)] = 0.0;
-    }
-}
-
-void MACSimulator::particleToGrid() {
-
-    std::fill(u.begin(), u.end(), 0.f);
-    std::fill(v.begin(), v.end(), 0.f);
-    std::fill(weight_u.begin(), weight_u.end(), 0.f);
-    std::fill(weight_v.begin(), weight_v.end(), 0.f);
-
-    for (const auto &p : particles) {
-        bidistri(u, nx + 1, ny, p.x, p.y - 0.5, p.u);
-        bidistri(weight_u, nx + 1, ny, p.x, p.y - 0.5, 1);
-
-        bidistri(v, nx, ny + 1, p.x - 0.5, p.y, p.v);
-        bidistri(weight_v, nx, ny + 1, p.x - 0.5, p.y, 1);
-    }
-
-    for (int i = 0; i < u.size(); i++) {
-        if (weight_u[i] > 1e-6)
-            u[i] /= weight_u[i];
-    }
-    for (int i = 0; i < v.size(); i++) {
-        if (weight_v[i] > 1e-6)
-            v[i] /= weight_v[i];
     }
 }
 
@@ -222,49 +201,6 @@ void MACSimulator::velExtrapolation() {
     }
 }
 
-void MACSimulator::gridToParticle() {
-    float flipRatio = 0.95f;
-
-#pragma omp parallel for
-    for (auto &p : particles) {
-        float u_new_grid = bilerp(u, nx + 1, ny, p.x, p.y - 0.5);
-        float v_new_grid = bilerp(v, nx, ny + 1, p.x - 0.5, p.y);
-
-        float u_old_grid = bilerp(u_old, nx + 1, ny, p.x, p.y - 0.5);
-        float v_old_grid = bilerp(v_old, nx, ny + 1, p.x - 0.5, p.y);
-
-        float u_pic = u_new_grid;
-        float v_pic = v_new_grid;
-
-        float u_flip = p.u + (u_new_grid - u_old_grid);
-        float v_flip = p.v + (v_new_grid - v_old_grid);
-
-        p.u = flipRatio * u_flip + (1.f - flipRatio) * u_pic;
-        p.v = flipRatio * v_flip + (1.f - flipRatio) * v_pic;
-    }
-}
-
-void MACSimulator::advectParticles(float dt) {
-    float local_max_u = 0.0f;
-    float local_max_v = 0.0f;
-
-#pragma omp parallel for reduction(max : local_max_u)                          \
-    reduction(max : local_max_v)
-    for (auto &p : particles) {
-        p.x += p.u * dt;
-        p.y += p.v * dt;
-
-        p.x = std::max(0.001f, std::min(float(nx) - 0.001f, p.x));
-        p.y = std::max(0.001f, std::min(float(ny) - 0.001f, p.y));
-
-        local_max_u = std::max(std::abs(p.u), max_u);
-        local_max_v = std::max(std::abs(p.v), max_v);
-    }
-
-    max_u = local_max_u;
-    max_v = local_max_v;
-}
-
 void MACSimulator::project() {
     int N = nx * ny;
 
@@ -334,22 +270,21 @@ void MACSimulator::project() {
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
 
-    std::fill(p.begin(), p.end(), 0.0);
-    for (int i = 0; i < N; i++)
-        if (fluid_map[i] != -1)
-            p[i] = pressure[fluid_map[i]];
-
 #pragma omp parallel for
     for (int j = 0; j < ny; j++) {
         for (int i = 1; i < nx; i++) {
-            u[IX_u(i, j)] -= (p[IX(i, j)] - p[IX(i - 1, j)]);
+            float p1 = pressure[fluid_map[IX(i, j)]];
+            float p2 = pressure[fluid_map[IX(i - 1, j)]];
+            u[IX_u(i, j)] -= (p1 - p2);
         }
     }
 
 #pragma omp parallel for
     for (int j = 1; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
-            v[IX_v(i, j)] -= (p[IX(i, j)] - p[IX(i, j - 1)]);
+            float p1 = pressure[fluid_map[IX(i, j)]];
+            float p2 = pressure[fluid_map[IX(i, j - 1)]];
+            v[IX_v(i, j)] -= (p1 - p2);
         }
     }
 }
@@ -375,7 +310,7 @@ void MACSimulator::applySurfaceTension(float dt) {
 
 #pragma omp parallel for
     for (int i = 0; i < nx * ny; i++) {
-        phi[0][i] = (float)cell_type[i];
+        phi[0][i] = density[i];
     }
 
     for (int iter = 0; iter < 2; iter++) {
@@ -446,77 +381,74 @@ void MACSimulator::applySurfaceTension(float dt) {
     }
 }
 
-void MACSimulator::markFluidCells() {
-    std::fill(cell_type.begin(), cell_type.end(), 0);
+void MACSimulator::advectDatas(float dt) {
+    // Advect U velocity
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i <= nx; i++) {
+            float x = (float)i;
+            float y = (float)j + 0.5f;
 
-#pragma omp parallel for
-    for (const auto &p : particles) {
-        int i = (int)p.x;
-        int j = (int)p.y;
-        if (i >= 0 && i < nx && j >= 0 && j < ny) {
-#pragma omp atomic write
-            cell_type[IX(i, j)] = 1; // 1 = 液體
+            float u_vel = u_old[IX_u(i, j)];
+            float v_vel = bilerp(v_old, nx, ny + 1, x - 0.5f, y);
+
+            float x_prev = x - u_vel * dt;
+            float y_prev = y - v_vel * dt;
+
+            u[IX_u(i, j)] = bilerp(u_old, nx + 1, ny, x_prev, y_prev - 0.5f);
+        }
+    }
+
+    // Advect V velocity
+    for (int j = 0; j <= ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float x = (float)i + 0.5f;
+            float y = (float)j;
+
+            float u_vel = bilerp(u_old, nx + 1, ny, x, y - 0.5f);
+            float v_vel = v_old[IX_v(i, j)];
+
+            float x_prev = x - u_vel * dt;
+            float y_prev = y - v_vel * dt;
+
+            v[IX_v(i, j)] = bilerp(v_old, nx, ny + 1, x_prev - 0.5f, y_prev);
+        }
+    }
+
+    // Advect density
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float x = (float)i + 0.5f;
+            float y = (float)j + 0.5f;
+
+            float u_vel = bilerp(u_old, nx + 1, ny, x, y - 0.5f);
+            float v_vel = bilerp(v_old, nx, ny + 1, x - 0.5f, y);
+
+            float x_prev = x - u_vel * dt;
+            float y_prev = y - v_vel * dt;
+
+            density[IX(i, j)] =
+                bilerp(density_old, nx, ny, x_prev - 0.5f, y_prev - 0.5f);
         }
     }
 }
 
-void MACSimulator::resampleParticles() {
-    const int target_ppc = 4;
-    const int max_ppc    = 8;
-    const int min_ppc    = 3;
+void MACSimulator::markFluidCells() {
+    std::fill(cell_type.begin(), cell_type.end(), 0);
 
-    std::fill(particles_count.begin(), particles_count.end(), 0);
-    for (const auto &p : particles) {
-        int i = std::clamp((int)p.x, 0, nx - 1);
-        int j = std::clamp((int)p.y, 0, ny - 1);
-        particles_count[IX(i, j)]++;
+#pragma omp parallel for
+    for (int i = 0; i < nx * ny; i++) {
+        if (density[i] > 0.1f)
+            cell_type[i] = 1;
+        else
+            cell_type[i] = 0;
     }
+}
 
-    std::fill(current_count.begin(), current_count.end(), 0);
-    auto new_end =
-        std::remove_if(particles.begin(), particles.end(), [&](const auto &p) {
-            int i   = std::clamp((int)p.x, 0, nx - 1);
-            int j   = std::clamp((int)p.y, 0, ny - 1);
-            int idx = IX(i, j);
-
-            current_count[idx]++;
-            if (current_count[idx] > max_ppc)
-                return true;
-
-            return false;
-        });
-    particles.erase(new_end, particles.end());
-
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            int idx = IX(i, j);
-
-            bool is_inter = 1;
-            if (i < nx - 1)
-                is_inter &= cell_type[IX(i + 1, j)];
-            if (i > 0)
-                is_inter &= cell_type[IX(i - 1, j)];
-            if (j < ny - 1)
-                is_inter &= cell_type[IX(i, j + 1)];
-            if (j > 0)
-                is_inter &= cell_type[IX(i, j - 1)];
-
-            if (is_inter && particles_count[idx] < min_ppc) {
-                int needed = target_ppc - particles_count[idx];
-
-                for (int k = 0; k < needed; k++) {
-                    float rx = i + ((float)rand() / RAND_MAX);
-                    float ry = j + ((float)rand() / RAND_MAX);
-
-                    float new_u = bilerp(u, nx + 1, ny, rx, ry - 0.5f);
-                    float new_v = bilerp(v, nx, ny + 1, rx - 0.5f, ry);
-
-                    particles.push_back({rx, ry, new_u, new_v});
-                }
-                cell_type[idx] = 1;
-            }
-        }
-    }
+float MACSimulator::distance2(float x1, float y1, float x2, float y2) {
+    /*
+     * Return the square of distance between two point
+     */
+    return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
 }
 
 float MACSimulator::bilerp(

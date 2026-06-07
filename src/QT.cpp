@@ -17,8 +17,8 @@
 QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
     phash_head.resize(nx * ny, -1);
     phash_next.clear();
-    leaf_table[0].clear();
-    leaf_table[1].clear();
+    leaf_table[0].resize(nx * ny, -1);
+    leaf_table[1].resize(nx * ny, -1);
     G     = 150.f;
     Sigma = 0.0f;
 
@@ -35,8 +35,8 @@ void QTSimulator::reset() {
     phash_next.clear();
     node_pool[0].clear();
     node_pool[1].clear();
-    leaf_table[0].clear();
-    leaf_table[1].clear();
+    leaf_table[0].resize(nx * ny, -1);
+    leaf_table[1].resize(nx * ny, -1);
 
     root_list = 0;
     allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
@@ -415,49 +415,98 @@ void QTSimulator::findAllEdges() {
 
     QTu_new.clear();
     QTv_new.clear();
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(new_list, leaf_idx);
 
-        float half_size = leaf.size / 2.f;
-        float quad_size = leaf.size / 4.f;
-        float step      = half_size + 0.1f;
+    int N = cached_leaves_idx.size();
+    if (N == 0)
+        return;
 
-        int neighbor_idx = 0;
+    std::vector<int> leaf_u_cnt(N, 0);
+    std::vector<int> leaf_v_cnt(N, 0);
+
+    // Calculate # of edges each leaf will generate
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        int leaf_idx     = cached_leaves_idx[i];
+        auto &leaf       = getNode(new_list, leaf_idx);
         auto &nodes_idx  = leaf.cached_neighbors_idx;
-        for (int dir = 0; dir < 4; dir++) {
-            int neighbot_cnt = leaf.neighbor_cnt[dir];
+        int neighbor_idx = 0;
 
+        for (int dir = 0; dir < 4; dir++) {
+            int neighbot_cnt  = leaf.neighbor_cnt[dir];
+            bool creates_edge = false;
+
+            if (neighbot_cnt == 0) {
+                creates_edge = true;
+            } else if (neighbot_cnt == 2) {
+                creates_edge = true;
+            } else if (neighbot_cnt == 1) {
+                auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
+                if (n_0.depth == leaf.depth) {
+                    if (dir > 1) {
+                        creates_edge = true;
+                    }
+                }
+            }
+
+            if (creates_edge) {
+                if (dir & 1) {
+                    leaf_v_cnt[i]++;
+                } else {
+                    leaf_u_cnt[i]++;
+                }
+            }
+            neighbor_idx += neighbot_cnt;
+        }
+    }
+
+    // Calculate the prefix sum
+    std::vector<int> leaf_u_offset(N, 0);
+    std::vector<int> leaf_v_offset(N, 0);
+    int total_u = 0;
+    int total_v = 0;
+
+    for (int i = 0; i < N; i++) {
+        leaf_u_offset[i] = total_u;
+        total_u += leaf_u_cnt[i];
+
+        leaf_v_offset[i] = total_v;
+        total_v += leaf_v_cnt[i];
+    }
+
+    QTu_new.resize(total_u);
+    QTv_new.resize(total_v);
+
+// Write NOT_OVERLAY datas
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        int leaf_idx     = cached_leaves_idx[i];
+        auto &leaf       = getNode(new_list, leaf_idx);
+        auto &nodes_idx  = leaf.cached_neighbors_idx;
+        int neighbor_idx = 0;
+
+        int u_idx = leaf_u_offset[i];
+        int v_idx = leaf_v_offset[i];
+
+        for (int dir = 0; dir < 4; dir++) {
+            int neighbot_cnt  = leaf.neighbor_cnt[dir];
+            bool creates_edge = false;
+
+            float half_size = leaf.size / 2.f;
             float x = leaf.x, y = leaf.y, solid_frac = 0;
-            int face_sgn;
+            int face_sgn                   = (dir <= 1) ? -1 : 1;
             std::vector<int> adj_cells_idx = {leaf_idx};
             std::vector<float> coefs;
 
-            // up or down, need update y
             if (dir & 1) {
                 y += (dir & 2 ? half_size : -half_size);
-            }
-            // left or right, need update x
-            else {
+            } else {
                 x += (dir & 2 ? half_size : -half_size);
             }
 
-            if (dir == 0)
-                leaf.ul_id = QTu_new.size();
-            if (dir == 1)
-                leaf.vl_id = QTv_new.size();
-            if (dir == 2)
-                leaf.ur_id = QTu_new.size();
-            if (dir == 3)
-                leaf.vr_id = QTv_new.size();
-
-            if (dir <= 1) // left and up
-                face_sgn = -1;
-            else // right and down
-                face_sgn = 1;
-
             if (neighbot_cnt == 0) {
                 coefs.assign({0});
-                solid_frac = 1;
+                solid_frac   = 1;
+                creates_edge = true;
             } else if (neighbot_cnt == 2) {
                 auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
                 adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
@@ -465,64 +514,97 @@ void QTSimulator::findAllEdges() {
 
                 float coef = face_sgn * 1.f / (1.5f * n_0.size);
                 coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
+                creates_edge = true;
             } else if (neighbot_cnt == 1) {
                 auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
                 if (n_0.depth == leaf.depth) {
-                    if (dir <= 1)
-                        goto OVERLAY_NODE;
-
-                    adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
-                    float coef = face_sgn * 1.f / leaf.size;
-                    coefs.assign({-coef, coef});
-                    goto UPDATE;
+                    if (dir > 1) {
+                        adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
+                        float coef = face_sgn * 1.f / leaf.size;
+                        coefs.assign({-coef, coef});
+                        creates_edge = true;
+                    }
                 }
-
-            OVERLAY_NODE:
-                switch (dir) {
-                case 0:
-                    leaf.ul_id = n_0.ur_id;
-                    break;
-                case 1:
-                    leaf.vl_id = n_0.vr_id;
-                    break;
-                case 2:
-                    leaf.ur_id = n_0.ul_id;
-                    break;
-                case 3:
-                    leaf.vr_id = n_0.vl_id;
-                    break;
-                }
-                neighbor_idx += neighbot_cnt;
-                continue;
-            } else {
-                std::cout << "Some ERROR appear" << std::endl;
-                continue;
             }
 
-        UPDATE:
-            // up or down, push into v
-            if (dir & 1)
-                QTv_new.push_back({
-                    x,
-                    y,
-                    leaf.size,
-                    0,
-                    solid_frac,
-                    adj_cells_idx,
-                    coefs,
-                });
-            // left or right, push into u
-            else
-                QTu_new.push_back({
-                    x,
-                    y,
-                    leaf.size,
-                    0,
-                    solid_frac,
-                    adj_cells_idx,
-                    coefs,
-                });
+            if (creates_edge) {
+                if (dir & 1) { // 寫入 v
+                    QTv_new[v_idx] = {
+                        x,
+                        y,
+                        leaf.size,
+                        0,
+                        solid_frac,
+                        adj_cells_idx,
+                        coefs,
+                    };
+                    if (dir == 1)
+                        leaf.vl_id = v_idx;
+                    if (dir == 3)
+                        leaf.vr_id = v_idx;
+                    v_idx++;
+                } else { // 寫入 u
+                    QTu_new[u_idx] = {
+                        x,
+                        y,
+                        leaf.size,
+                        0,
+                        solid_frac,
+                        adj_cells_idx,
+                        coefs,
+                    };
+                    if (dir == 0)
+                        leaf.ul_id = u_idx;
+                    if (dir == 2)
+                        leaf.ur_id = u_idx;
+                    u_idx++;
+                }
+            }
 
+            neighbor_idx += neighbot_cnt;
+        }
+    }
+
+// Write OVERLAY datas
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        int leaf_idx     = cached_leaves_idx[i];
+        auto &leaf       = getNode(new_list, leaf_idx);
+        auto &nodes_idx  = leaf.cached_neighbors_idx;
+        int neighbor_idx = 0;
+
+        for (int dir = 0; dir < 4; dir++) {
+            int neighbot_cnt = leaf.neighbor_cnt[dir];
+
+            if (neighbot_cnt == 1) {
+                auto &n_0       = getNode(new_list, nodes_idx[neighbor_idx]);
+                bool is_overlay = false;
+
+                if (n_0.depth == leaf.depth) {
+                    if (dir <= 1) {
+                        is_overlay = true;
+                    }
+                } else if (n_0.depth < leaf.depth) {
+                    is_overlay = true;
+                }
+
+                if (is_overlay) {
+                    switch (dir) {
+                    case 0:
+                        leaf.ul_id = n_0.ur_id;
+                        break;
+                    case 1:
+                        leaf.vl_id = n_0.vr_id;
+                        break;
+                    case 2:
+                        leaf.ur_id = n_0.ul_id;
+                        break;
+                    case 3:
+                        leaf.vr_id = n_0.vl_id;
+                        break;
+                    }
+                }
+            }
             neighbor_idx += neighbot_cnt;
         }
     }
@@ -586,15 +668,17 @@ void QTSimulator::applyGravity(float dt) {
 }
 
 void QTSimulator::setBoundaries() {
-    /*
-     * For all edges.
-     * Set the boundary to 0
-     */
+/*
+ * For all edges.
+ * Set the boundary to 0
+ */
+#pragma omp parallel for
     for (int i = 0; i < QTu.size(); i++) {
         if (QTu[i].solid_fraction >= 1.f)
             QTu[i].val = 0.0f;
     }
 
+#pragma omp parallel for
     for (int i = 0; i < QTv.size(); i++) {
         if (QTv[i].solid_fraction >= 1.f)
             QTv[i].val = 0.0f;
@@ -952,6 +1036,7 @@ void QTSimulator::FMMSolver(std::vector<std::pair<float, int>> &init_datas) {
             }
         }
     }
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
         leaf.phi   = leaf.phi_new;
@@ -1078,10 +1163,10 @@ void QTSimulator::getNodesIdxIn(
     int center_idx = getNodeIdxAt(x, y, root_list);
     if (center_idx == -1)
         return;
+    auto &center = getNode(root_list, center_idx);
 
-    auto &center          = getNode(root_list, center_idx);
-    float search_radius_2 = center.size * radius_ratio;
-    search_radius_2 *= search_radius_2;
+    float r  = center.size * radius_ratio;
+    float r2 = r * r;
 
     thread_local std::vector<uint8_t> visited;
     if (visited.size() < node_pool[root_list].size())
@@ -1105,13 +1190,12 @@ void QTSimulator::getNodesIdxIn(
                 continue;
 
             float dist = distance2(node.x, node.y, x, y);
-            if (dist <= search_radius_2) {
+            if (dist <= r2) {
                 visited[node_idx] = true;
                 nodes_idx.push_back(node_idx);
             }
         }
     }
-
     for (int idx : nodes_idx)
         visited[idx] = false;
 }
@@ -1151,8 +1235,6 @@ NeighborDatas QTSimulator::getNeighborDatas(int node_idx) {
 
 InterpolatedData
 QTSimulator::advect(float x, float y, float dt, uint32_t opts) {
-    // float u_val = bilerp(u, nx + 1, ny, x, y);
-    // float v_val = bilerp(v, nx, ny + 1, x, y);
     auto current_data = MLSinterpolate(x, y, OPT_VEL_ALL);
     float u_val       = current_data.u;
     float v_val       = current_data.v;
@@ -1195,9 +1277,14 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     // ==========================================================
     if (opts & OPT_U_ALL) {
         thread_local std::vector<MLSSamplePoint> u_samples;
-        thread_local std::vector<bool> visited_u_faces;
+        thread_local std::vector<uint64_t> visited_u_faces;
+        thread_local uint64_t current_u_epoch = 0;
+
         u_samples.clear();
-        visited_u_faces.assign(QTu.size(), 0);
+        if (visited_u_faces.size() < QTu.size()) {
+            visited_u_faces.resize(QTu.size(), 0);
+        }
+        current_u_epoch++;
 
         for (int n_idx : nodes_to_process) {
             auto &n = getNode(root_list, n_idx);
@@ -1205,8 +1292,22 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
             // 論文提到 T-junction 會自動對齊到大 parent face 取得單一速度值
             int left_face  = n.ul_id;
             int right_face = n.ur_id;
-            MLSMirrorEdge(u_samples, visited_u_faces, left_face, QTu, true);
-            MLSMirrorEdge(u_samples, visited_u_faces, right_face, QTu, true);
+            MLSMirrorEdge(
+                u_samples,
+                visited_u_faces,
+                current_u_epoch,
+                left_face,
+                QTu,
+                true
+            );
+            MLSMirrorEdge(
+                u_samples,
+                visited_u_faces,
+                current_u_epoch,
+                right_face,
+                QTu,
+                true
+            );
         }
         auto tmp_result_u = solveMLS(x, y, u_samples);
         result.u          = tmp_result_u.first;
@@ -1218,16 +1319,35 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
     // ==========================================================
     if (opts & OPT_V_ALL) {
         thread_local std::vector<MLSSamplePoint> v_samples;
-        thread_local std::vector<bool> visited_v_faces;
+        thread_local std::vector<uint64_t> visited_v_faces;
+        thread_local uint64_t current_v_epoch = 0;
+
         v_samples.clear();
-        visited_v_faces.assign(QTv.size(), 0);
+        if (visited_v_faces.size() < QTv.size()) {
+            visited_v_faces.resize(QTv.size(), 0);
+        }
+        current_v_epoch++;
 
         for (int n_idx : nodes_to_process) {
             auto &n         = getNode(root_list, n_idx);
             int top_face    = n.vl_id;
             int bottom_face = n.vr_id;
-            MLSMirrorEdge(v_samples, visited_v_faces, top_face, QTv, false);
-            MLSMirrorEdge(v_samples, visited_v_faces, bottom_face, QTv, false);
+            MLSMirrorEdge(
+                v_samples,
+                visited_v_faces,
+                current_v_epoch,
+                top_face,
+                QTv,
+                false
+            );
+            MLSMirrorEdge(
+                v_samples,
+                visited_v_faces,
+                current_v_epoch,
+                bottom_face,
+                QTv,
+                false
+            );
         }
         auto tmp_result_v = solveMLS(x, y, v_samples);
         result.v          = tmp_result_v.first;
@@ -1330,16 +1450,17 @@ void QTSimulator::MLSMirrorNode(
 
 void QTSimulator::MLSMirrorEdge(
     std::vector<MLSSamplePoint> &sample_points,
-    std::vector<bool> &visited_faces,
+    std::vector<uint64_t> &visited_faces,
+    uint64_t visit_epoch,
     int face_idx,
     std::vector<QuadtreeEdge> &field,
     bool is_u
 ) {
     if (face_idx == -1)
         return;
-    if (visited_faces[face_idx])
+    if (visited_faces[face_idx] == visit_epoch)
         return;
-    visited_faces[face_idx] = 1;
+    visited_faces[face_idx] = visit_epoch;
 
     float min_x = 0.0f;
     float max_x = nx;

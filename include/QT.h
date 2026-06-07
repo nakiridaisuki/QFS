@@ -159,7 +159,8 @@ class QTSimulator : public BaseSimulator {
     MLSMirrorNode(std::vector<MLSSamplePoint> &sample_points, int node_idx);
     void MLSMirrorEdge(
         std::vector<MLSSamplePoint> &sample_points,
-        std::vector<bool> &visited_faces,
+        std::vector<uint64_t> &visited_faces,
+        uint64_t visit_epoch,
         int face_idx,
         std::vector<QuadtreeEdge> &field,
         bool is_u

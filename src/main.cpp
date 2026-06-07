@@ -17,7 +17,7 @@ int main() {
 
     const std::vector<int> resolutions = {64, 128, 256, 512, 1024};
 
-    int simWidth  = 128;
+    int simWidth  = 512;
     int simHeight = simWidth;
 
     InitWindow(
@@ -27,7 +27,8 @@ int main() {
 
     int simType = SimType::MAC;
 
-    BaseSimulator *sim = new MACSimulator(simWidth, simHeight);
+    // BaseSimulator *sim = new MACSimulator(simWidth, simHeight);
+    BaseSimulator *sim = new QTSimulator(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
     SimulatorUI gui(sim, renderer, resolutions);
 

@@ -352,33 +352,25 @@ void QTSimulator::cacheLeaves() {
     cached_leaves_idx.clear();
     collectLeafNodes(cached_leaves_idx, new_list);
 
-    sort(
-        cached_leaves_idx.begin(),
-        cached_leaves_idx.end(),
-        [&](int a_idx, int b_idx) {
-            auto &a = getNode(new_list, a_idx);
-            auto &b = getNode(new_list, b_idx);
-            if (a.depth != b.depth)
-                return a.depth < b.depth;
-            if (a.x != b.x)
-                return a.x < b.x;
-            return a.y < b.y;
-        }
-    );
+#pragma omp parallel
+    {
+#pragma omp for
+        for (int i = 0; i < nx * ny; i++)
+            leaf_table[new_list][i] = -1;
 
-    leaf_table[new_list].assign(nx * ny, -1);
-#pragma omp parallel for
-    for (int leaf_idx : cached_leaves_idx) {
-        const auto &leaf = getNode(new_list, leaf_idx);
+#pragma omp for
+        for (int leaf_idx : cached_leaves_idx) {
+            const auto &leaf = getNode(new_list, leaf_idx);
 
-        int x_start = std::max(0, (int)(leaf.x - leaf.size / 2.f));
-        int x_end   = std::min(nx, (int)(leaf.x + leaf.size / 2.f));
-        int y_start = std::max(0, (int)(leaf.y - leaf.size / 2.f));
-        int y_end   = std::min(ny, (int)(leaf.y + leaf.size / 2.f));
+            int x_start = std::max(0, (int)(leaf.x - leaf.size / 2.f));
+            int x_end   = std::min(nx, (int)(leaf.x + leaf.size / 2.f));
+            int y_start = std::max(0, (int)(leaf.y - leaf.size / 2.f));
+            int y_end   = std::min(ny, (int)(leaf.y + leaf.size / 2.f));
 
-        for (int y = y_start; y < y_end; ++y) {
-            for (int x = x_start; x < x_end; ++x) {
-                leaf_table[new_list][IX(x, y)] = leaf_idx;
+            for (int y = y_start; y < y_end; ++y) {
+                for (int x = x_start; x < x_end; ++x) {
+                    leaf_table[new_list][IX(x, y)] = leaf_idx;
+                }
             }
         }
     }
@@ -704,19 +696,39 @@ void QTSimulator::project() {
         return total / liquid;
     };
 
-    int fluid_count = 0;
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(root_list, leaf_idx);
+    int N = cached_leaves_idx.size();
+    static std::vector<int> leaf_fluid_id_offset(N, 0);
+    if (leaf_fluid_id_offset.size() < N)
+        leaf_fluid_id_offset.resize(N, 0);
+
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        if (getNode(root_list, cached_leaves_idx[i]).phi <= 0.0)
+            leaf_fluid_id_offset[i] = 1;
+        else
+            leaf_fluid_id_offset[i] = 0;
+    }
+
+    int total_fluid_count = 0;
+    for (int i = 0; i < N; i++) {
+        int tmp                 = leaf_fluid_id_offset[i];
+        leaf_fluid_id_offset[i] = total_fluid_count;
+        total_fluid_count += tmp;
+    }
+
+    if (total_fluid_count == 0)
+        return;
+
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        auto &leaf = getNode(root_list, cached_leaves_idx[i]);
         if (leaf.phi <= 0.0)
-            leaf.fluid_id = fluid_count++;
+            leaf.fluid_id = leaf_fluid_id_offset[i];
         else
             leaf.fluid_id = -1;
     }
 
-    if (fluid_count == 0)
-        return;
-
-    Eigen::VectorXf div(fluid_count);
+    Eigen::VectorXf div(total_fluid_count);
     div.setZero();
     QTtriplets.clear();
 
@@ -771,7 +783,7 @@ void QTSimulator::project() {
 #pragma omp for nowait
         for (auto &face : QTu)
             addFace(face, local_t);
-#pragma omp for nowait
+#pragma omp for
         for (auto &face : QTv)
             addFace(face, local_t);
     }
@@ -780,7 +792,7 @@ void QTSimulator::project() {
         QTtriplets.insert(QTtriplets.end(), local_t.begin(), local_t.end());
 
     // Eigen solvers
-    Eigen::SparseMatrix<float> A(fluid_count, fluid_count);
+    Eigen::SparseMatrix<float> A(total_fluid_count, total_fluid_count);
     A.setFromTriplets(QTtriplets.begin(), QTtriplets.end());
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
@@ -805,15 +817,20 @@ void QTSimulator::project() {
         face.val -= W_prime * grad_p;
     };
 
-#pragma omp parallel for
-    for (auto &face : QTu)
-        updateFace(face);
-#pragma omp parallel for
-    for (auto &face : QTv)
-        updateFace(face);
+#pragma omp parallel
+    {
+#pragma omp for nowait
+        for (auto &face : QTu)
+            updateFace(face);
+#pragma omp for
+        for (auto &face : QTv)
+            updateFace(face);
+    }
 }
 
 void QTSimulator::velExtrapolation() {
+
+    const int ITER = 10;
 
     std::queue<std::pair<int, int>> Q;
     for (int leaf_idx : cached_leaves_idx) {
@@ -843,7 +860,7 @@ void QTSimulator::velExtrapolation() {
                 auto &neighbor   = getNode(root_list, neighbor_idx);
 
                 int dist = curr_dist + 1;
-                if (neighbor.known || dist > 4)
+                if (neighbor.known || dist > ITER)
                     continue;
 
                 if (dir != 0)
@@ -860,6 +877,8 @@ void QTSimulator::velExtrapolation() {
             idx += curr_node.neighbor_cnt[dir];
         }
     }
+
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
         leaf.known = false;
@@ -874,7 +893,7 @@ void QTSimulator::redistancing() {
 
     using PQElement = std::pair<float, int>; // {abs_phi, node_idx}
 
-    std::vector<PQElement> init_elements;
+#pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
 
@@ -896,26 +915,54 @@ void QTSimulator::redistancing() {
 
             leaf.phi_new = std::min(leaf.phi_new, theta * L);
             leaf.known   = true;
-
-            neigh.phi_new = std::min(neigh.phi_new, (1.f - theta) * L);
-            neigh.known   = true;
         }
     }
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(root_list, leaf_idx);
+
+    int N = cached_leaves_idx.size();
+    static std::vector<int> leaf_offset(N, 0);
+    if (leaf_offset.size() < cached_leaves_idx.size())
+        leaf_offset.resize(cached_leaves_idx.size(), 0);
+
+    // Calculate prefix parallelize offset
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        int leaf_idx = cached_leaves_idx[i];
+        if (getNode(root_list, leaf_idx).known)
+            leaf_offset[i] = 1;
+        else
+            leaf_offset[i] = 0;
+    }
+
+    // Calculate prefix sum
+    int total_elements = 0;
+    for (int i = 0; i < N; i++) {
+        int temp       = leaf_offset[i];
+        leaf_offset[i] = total_elements;
+        total_elements += temp;
+    }
+
+    if (total_elements == 0) {
+        return;
+    }
+
+    std::vector<PQElement> init_elements(total_elements);
+
+    // Fill data
+#pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        int leaf_idx = cached_leaves_idx[i];
+        auto &leaf   = getNode(root_list, leaf_idx);
 
         float sign = (leaf.phi < 0 ? -1 : 1);
         if (leaf.known) {
-            init_elements.push_back({std::abs(leaf.phi_new), leaf_idx});
+            int write_idx            = leaf_offset[i];
+            init_elements[write_idx] = {std::abs(leaf.phi_new), leaf_idx};
             leaf.phi_new *= sign;
-        } else
+        } else {
             leaf.phi_new = std::numeric_limits<float>::infinity();
+        }
 
         leaf.known = false;
-    }
-
-    if (init_elements.empty()) {
-        return;
     }
 
     FMMSolver(init_elements);
@@ -1071,10 +1118,36 @@ void QTSimulator::subdivideNode(int list_idx, int node_idx) {
 void QTSimulator::collectLeafNodes(
     std::vector<int> &leaves_idx, int list_idx
 ) const {
+    static std::vector<int> node_offset(node_pool[list_idx].size(), 0);
+    if (node_offset.size() < node_pool[list_idx].size())
+        node_offset.resize(node_pool[list_idx].size(), 0);
+
+#pragma omp parallel for
     for (int i = 0; i < node_pool[list_idx].size(); i++) {
         auto &node = getNode(list_idx, i);
         if (node.is_leaf)
-            leaves_idx.push_back(i);
+            node_offset[i] = 1;
+        else
+            node_offset[i] = 0;
+    }
+
+    int total_offset = 0;
+    for (int i = 0; i < node_pool[list_idx].size(); i++) {
+        int tmp        = node_offset[i];
+        node_offset[i] = total_offset;
+        total_offset += tmp;
+    }
+
+    if (total_offset == 0)
+        return;
+
+    leaves_idx.resize(total_offset, 0);
+
+#pragma omp parallel for
+    for (int i = 0; i < node_pool[list_idx].size(); i++) {
+        auto &node = getNode(list_idx, i);
+        if (node.is_leaf)
+            leaves_idx[node_offset[i]] = i;
     }
 }
 
@@ -1373,9 +1446,10 @@ std::pair<float, float> QTSimulator::solveMLS(
         float dy = std::abs(p.y - y);
         float h  = p.h;
 
+        float inv_h  = 1.f / p.h;
         float eps    = 1e-2f;
-        float wx     = std::max(1.f - (dx / h), eps);
-        float wy     = std::max(1.f - (dy / h), eps);
+        float wx     = std::max(1.f - (dx * inv_h), eps);
+        float wy     = std::max(1.f - (dy * inv_h), eps);
         float weight = wx * wy;
 
         float lx = p.x - x;

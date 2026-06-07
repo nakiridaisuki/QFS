@@ -107,6 +107,7 @@ class QTSimulator : public BaseSimulator {
     void findAllEdges();
     void advectQuadtreeDatas(float dt);
     void applyGravity(float dt);
+    void applySurfaceTension(float dt);
     void setBoundaries();
     void project();
     void velExtrapolation();
@@ -148,6 +149,7 @@ class QTSimulator : public BaseSimulator {
     inline float circleSDF(float x, float y) {
         return std::sqrt(distance2(x, y, water_x, water_y)) - water_radius;
     };
+    float computeCurvature(float x, float y, float size);
 
     // MLS interpolate functions
     InterpolatedData

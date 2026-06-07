@@ -70,7 +70,7 @@ int main() {
                 sim->delWater(gridX, gridY, brushRadius);
             }
 
-            float frameTime = std::min(GetFrameTime(), 0.0333f);
+            float frameTime = std::min(GetFrameTime(), 0.01667f);
             sim->update(frameTime);
         }
 

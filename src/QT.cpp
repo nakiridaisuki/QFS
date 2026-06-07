@@ -120,6 +120,7 @@ void QTSimulator::update(float dt) {
     // Start solve new frame data
     // 1. apply gravity on new tree
     applyGravity(dt);
+    applySurfaceTension(dt);
     // 2. solve the pressure
     setBoundaries();
     project();
@@ -656,6 +657,98 @@ void QTSimulator::applyGravity(float dt) {
 
         if (is_water)
             face.val += G * dt;
+    }
+}
+
+void QTSimulator::applySurfaceTension(float dt) {
+    if (Sigma <= 0.0f)
+        return;
+
+    std::cout << Sigma << std::endl;
+
+    // 1. 計算所有葉子節點的曲率 (只針對靠近交界面的節點進行計算以節省效能)
+    std::vector<float> leaf_H(node_pool[root_list].size(), 0.0f);
+
+#pragma omp parallel for
+    for (int i = 0; i < cached_leaves_idx.size(); ++i) {
+        int leaf_idx = cached_leaves_idx[i];
+        auto &leaf   = getNode(root_list, leaf_idx);
+
+        // 只計算靠近表面 (2 倍網格大小內) 的單元曲率
+        if (std::abs(leaf.phi) < leaf.size * 2.0f) {
+            leaf_H[leaf_idx] = computeCurvature(leaf.x, leaf.y, leaf.size);
+        }
+    }
+
+    // 重用與 project() 相同的 W_k 計算邏輯
+    auto compute_Wk = [&](QuadtreeEdge &face) {
+        float total = 0, liquid = 0;
+        for (size_t i = 0; i < face.adj_cells_idx.size(); i++) {
+            auto &cell = getNode(root_list, face.adj_cells_idx[i]);
+            total += face.grad_coeff[i] * cell.phi;
+            if (cell.phi <= 0.f)
+                liquid += face.grad_coeff[i] * cell.phi;
+        }
+        if (std::abs(liquid) < 1e-6f)
+            return 1.f;
+        return total / liquid;
+    };
+
+    // 2. 更新水平面速度 (QTu)
+#pragma omp parallel for
+    for (size_t k = 0; k < QTu.size(); ++k) {
+        auto &face          = QTu[k];
+        bool near_interface = false;
+        for (int cell_idx : face.adj_cells_idx) {
+            if (std::abs(getNode(root_list, cell_idx).phi) <
+                face.length * 2.0f) {
+                near_interface = true;
+                break;
+            }
+        }
+        if (!near_interface)
+            continue;
+
+        float W_prime = std::max(compute_Wk(face), 0.01f);
+        float grad_H  = 0.0f;
+
+        // 累加鄰近單元的曲率梯度 (依據 Ghost Fluid 邏輯，僅考慮液體單元)
+        for (size_t i = 0; i < face.adj_cells_idx.size(); ++i) {
+            int cell_idx = face.adj_cells_idx[i];
+            auto &cell   = getNode(root_list, cell_idx);
+            if (cell.phi <= 0.0f) {
+                grad_H += face.grad_coeff[i] * Sigma * leaf_H[cell_idx];
+            }
+        }
+        // 將表面張力加速度融入中間速度
+        face.val += dt * W_prime * grad_H;
+    }
+
+    // 3. 更新垂直面速度 (QTv)
+#pragma omp parallel for
+    for (size_t k = 0; k < QTv.size(); ++k) {
+        auto &face          = QTv[k];
+        bool near_interface = false;
+        for (int cell_idx : face.adj_cells_idx) {
+            if (std::abs(getNode(root_list, cell_idx).phi) <
+                face.length * 2.0f) {
+                near_interface = true;
+                break;
+            }
+        }
+        if (!near_interface)
+            continue;
+
+        float W_prime = std::max(compute_Wk(face), 0.01f);
+        float grad_H  = 0.0f;
+        for (size_t i = 0; i < face.adj_cells_idx.size(); ++i) {
+            int cell_idx = face.adj_cells_idx[i];
+            auto &cell   = getNode(root_list, cell_idx);
+            if (cell.phi <= 0.0f) {
+                grad_H += face.grad_coeff[i] * Sigma * leaf_H[cell_idx];
+            }
+        }
+        face.val += dt * W_prime * grad_H;
     }
 }
 
@@ -1306,6 +1399,43 @@ NeighborDatas QTSimulator::getNeighborDatas(int node_idx) {
         idx += neigh_cnt;
     }
     return result;
+}
+
+float QTSimulator::computeCurvature(float x, float y, float size) {
+    // 差分步長，與網格大小成比例
+    float d = size * 0.5f;
+
+    // 在中心點周圍採樣 9 個點以計算偏微分
+    float phi_C = MLSinterpolate(x, y, OPT_CELL_ALL).phi;
+    float phi_L = MLSinterpolate(x - d, y, OPT_CELL_ALL).phi;
+    float phi_R = MLSinterpolate(x + d, y, OPT_CELL_ALL).phi;
+    float phi_T = MLSinterpolate(x, y + d, OPT_CELL_ALL).phi;
+    float phi_B = MLSinterpolate(x, y - d, OPT_CELL_ALL).phi;
+
+    float phi_LT = MLSinterpolate(x - d, y + d, OPT_CELL_ALL).phi;
+    float phi_RT = MLSinterpolate(x + d, y + d, OPT_CELL_ALL).phi;
+    float phi_LB = MLSinterpolate(x - d, y - d, OPT_CELL_ALL).phi;
+    float phi_RB = MLSinterpolate(x + d, y - d, OPT_CELL_ALL).phi;
+
+    // 一階偏微分
+    float dx = (phi_R - phi_L) / (2.f * d);
+    float dy = (phi_T - phi_B) / (2.f * d);
+
+    // 二階偏微分
+    float dxx = (phi_R - 2.f * phi_C + phi_L) / (d * d);
+    float dyy = (phi_T - 2.f * phi_C + phi_B) / (d * d);
+    float dxy = (phi_RT - phi_LT - phi_RB + phi_LB) / (4.f * d * d);
+
+    float denom = std::sqrt(dx * dx + dy * dy);
+    if (denom < 1e-5f)
+        return 0.0f;
+
+    // 2D 曲率公式
+    float num  = dxx * dy * dy - 2.f * dxy * dx * dy + dyy * dx * dx;
+    float curv = num / (denom * denom * denom);
+
+    // 限制曲率極值，避免在網格解析度極限處產生不穩定的數值震盪
+    return std::clamp(curv, -2.f / size, 2.f / size);
 }
 
 InterpolatedData

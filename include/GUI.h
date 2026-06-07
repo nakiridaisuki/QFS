@@ -91,6 +91,15 @@ class SimulatorUI {
     }
 
     void drawUI() {
+
+        DrawText(
+            TextFormat("Solver Iterations: %d", sim->getPCGIter()),
+            120,
+            35,
+            20,
+            LIME
+        );
+
         float curr_y = 60;
         GuiCheckBox(Rectangle{20, curr_y, 20, 20}, "Show UI", &showUI);
         GuiCheckBox(Rectangle{120, curr_y, 20, 20}, "Show Debug", &showDebug);

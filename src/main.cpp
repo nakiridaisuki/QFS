@@ -4,7 +4,6 @@
 #include "QT.h"
 #include "Renderer.h"
 #include <algorithm>
-#include <cmath>
 #include <vector>
 
 #define RAYGUI_IMPLEMENTATION

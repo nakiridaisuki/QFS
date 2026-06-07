@@ -299,6 +299,8 @@ void MACSimulator::project() {
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
 
+    PCGItertimes = solver.iterations();
+
     auto get_pressure = [&](int i, int j) {
         int idx   = IX(i, j);
         int f_idx = fluid_map[idx];

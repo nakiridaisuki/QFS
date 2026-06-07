@@ -797,6 +797,8 @@ void QTSimulator::project() {
     solver.compute(A);
     Eigen::VectorXf pressure = solver.solve(div);
 
+    PCGItertimes = solver.iterations();
+
     auto updateFace = [&](QuadtreeEdge &face) {
         bool has_fluid = false;
         for (int cell_idx : face.adj_cells_idx)

@@ -13,6 +13,7 @@ struct Line {
 
 class BaseSimulator {
   protected:
+    int PCGItertimes;
     float G;     // Gravity const
     float Sigma; // surface tension
 
@@ -28,6 +29,7 @@ class BaseSimulator {
     // get functions for main loop
     float getGravity() { return G; }
     float getSurfaceTension() { return Sigma; }
+    int getPCGIter() { return PCGItertimes; }
 
     void setGravity(float gravity) { G = gravity; }
     void setSigma(float sigma) { Sigma = sigma; }

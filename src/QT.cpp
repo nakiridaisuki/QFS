@@ -43,6 +43,18 @@ void QTSimulator::reset() {
     initQuadtree(3, root_list);
 }
 
+void QTSimulator::initQuadtree(int max_depth, int list_idx, int node_idx) {
+    if (node_pool[list_idx][node_idx].depth >= max_depth)
+        return;
+
+    subdivideNode(list_idx, node_idx);
+    for (int i = 0; i < 4; i++) {
+        initQuadtree(
+            max_depth, list_idx, node_pool[list_idx][node_idx].children_idx[i]
+        );
+    }
+}
+
 void QTSimulator::addWater(float x, float y, float radius) {
     add_water    = true;
     water_x      = x;
@@ -56,6 +68,11 @@ void QTSimulator::delWater(float x, float y, float radius) {
     water_radius = radius;
 }
 
+std::vector<Line> QTSimulator::getLines() const {
+    std::vector<Line> lines;
+    recursiveGetLines(lines, root_list);
+    return lines;
+}
 void QTSimulator::recursiveGetLines(
     std::vector<Line> &lines, int list_idx, int node_idx
 ) const {
@@ -73,77 +90,48 @@ void QTSimulator::recursiveGetLines(
         return;
     }
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; i++)
         recursiveGetLines(lines, list_idx, node.children_idx[i]);
-    }
-}
-std::vector<Line> QTSimulator::getLines() const {
-    std::vector<Line> lines;
-
-    recursiveGetLines(lines, root_list);
-
-    return lines;
 }
 
 void QTSimulator::update(float dt) {
-    // Generate new Quad Tree
     computeSizingFunction(dt);
     propagateSizingFunction();
 
+    // Prepare for building a new tree
     int new_root_list = 1 - root_list;
     node_pool[new_root_list].clear();
     leaf_table[new_root_list].clear();
     allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, new_root_list);
-    recursiveBuildTree(dt, new_root_list);
 
-    smoothing(new_root_list);
-    cacheLeaves(new_root_list);
-    cacheNeighbors(new_root_list);
+    // Build a new tree
+    recursiveBuildTree(dt);
+    smoothing();
+    cacheLeaves();
+    cacheNeighbors();
+    findAllEdges();
+    advectQuadtreeDatas(dt);
 
-    findAllEdges(new_root_list);
-
-    advectQuadtreeDatas(dt, new_root_list);
+    // Replace old tree with new tree
     root_list = new_root_list;
+    QTu       = QTu_new;
+    QTv       = QTv_new;
 
-    QTu = QTu_new;
-    QTv = QTv_new;
-
-    for (auto &face : QTu)
-        face.val_old = face.val;
-    for (auto &face : QTv)
-        face.val_old = face.val;
-
-    QTapplyGravity(dt);
-
+    // Start solve new frame data
+    // 1. apply gravity on new tree
+    applyGravity(dt);
+    // 2. solve the pressure
     setBoundaries();
-    QTproject();
+    project();
     setBoundaries();
-
+    // 3. extrapolate velocity
     velExtrapolation();
+    // 4. rebuild level set(phi)
     redistancing();
 
+    // Reset interact state
     add_water = false;
     del_water = false;
-}
-
-void QTSimulator::setBoundaries() {
-    /*
-     * For all edges.
-     * Set the boundary to 0
-     */
-    for (int i = 0; i < QTu.size(); i++) {
-        if (QTu[i].solid_fraction >= 1.f) {
-            QTu[i].val     = 0.0f;
-            QTu[i].val_old = 0.0f;
-        }
-    }
-
-    for (int i = 0; i < QTv.size(); i++) {
-        if (QTv[i].solid_fraction >= 1.f) {
-            QTv[i].val     = 0.0f;
-            QTv[i].val_old = 0.0f;
-        }
-    }
 }
 
 void QTSimulator::computeSizingFunction(float dt) {
@@ -254,13 +242,13 @@ void QTSimulator::propagateSizingFunction() {
     }
 }
 
-void QTSimulator::recursiveBuildTree(float dt, int list_idx, int node_idx) {
+void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
     /*
-     * Recursive
-     * build the tree until size to 1.f
+     * Build new quadtree -> new tree list id = 1 - root_list
      */
 
-    auto &node = getNode(list_idx, node_idx);
+    int new_list = 1 - root_list;
+    auto &node   = getNode(new_list, node_idx);
     if (node.size < 1.5f)
         return;
 
@@ -281,26 +269,156 @@ void QTSimulator::recursiveBuildTree(float dt, int list_idx, int node_idx) {
 
     // if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
     if (std::abs(exp_phi) < node.size) {
-        subdivideNode(list_idx, node_idx);
+        subdivideNode(new_list, node_idx);
 
         for (int i = 0; i < 4; i++) {
-            recursiveBuildTree(
-                dt, list_idx, getNode(list_idx, node_idx).children_idx[i]
-            );
+            recursiveBuildTree(dt, getNode(new_list, node_idx).children_idx[i]);
         }
     }
 }
 
-void QTSimulator::findAllEdges(int list_idx) {
+void QTSimulator::smoothing() {
     /*
-     * For all leaves.
-     * find all leaves' edge
+     * Smooth new tree.
+     * Keep |a.depth - b.depth| <= 1, where a,b are adjacent leaves.
+     * Only for new tree -> 1 - root_list
      */
+
+    int new_list = 1 - root_list;
+    std::vector<int> leaves;
+    collectLeafNodes(leaves, new_list);
+
+    auto surfaceFirst = [&](int a_idx, int b_idx) {
+        return std::abs(getNode(new_list, a_idx).depth) <
+               std::abs(getNode(new_list, b_idx).depth);
+    };
+    std::priority_queue<int, std::vector<int>, decltype(surfaceFirst)> pq(
+        surfaceFirst, std::move(leaves)
+    );
+
+    while (!pq.empty()) {
+        int node_idx = pq.top();
+        pq.pop();
+
+        float node_x, node_y, node_size;
+        int node_depth;
+        bool node_is_leaf;
+        {
+            auto &node   = getNode(new_list, node_idx);
+            node_x       = node.x;
+            node_y       = node.y;
+            node_size    = node.size;
+            node_depth   = node.depth;
+            node_is_leaf = node.is_leaf;
+        }
+
+        if (!node_is_leaf)
+            continue;
+
+        float step       = node_size / 2.f + 0.1f;
+        int direction[5] = {1, 0, -1, 0, 1};
+        for (int i = 0; i < 4; i++) {
+            float dx = direction[i] * step;
+            float dy = direction[i + 1] * step;
+
+            float x = node_x + dx;
+            float y = node_y + dy;
+
+            if (x < 0 || x > nx || y < 0 || y > ny)
+                continue;
+
+            int neighbor_idx = getNodeIdxAt(x, y, new_list);
+            if (neighbor_idx == -1)
+                continue;
+
+            if (node_depth - getNode(new_list, neighbor_idx).depth > 1) {
+                subdivideNode(new_list, neighbor_idx);
+                for (int c = 0; c < 4; c++) {
+                    auto &neighbor = getNode(new_list, neighbor_idx);
+                    auto &child = getNode(new_list, neighbor.children_idx[c]);
+                    child.phi   = neighbor.phi;
+                    pq.push(neighbor.children_idx[c]);
+                }
+            }
+        }
+    }
+}
+
+void QTSimulator::cacheLeaves() {
+    /*
+     * Build cache leaves for new tree.
+     * Only for new tree -> 1 - root_list
+     */
+
+    int new_list = 1 - root_list;
+    cached_leaves_idx.clear();
+    collectLeafNodes(cached_leaves_idx, new_list);
+
+    sort(
+        cached_leaves_idx.begin(),
+        cached_leaves_idx.end(),
+        [&](int a_idx, int b_idx) {
+            auto &a = getNode(new_list, a_idx);
+            auto &b = getNode(new_list, b_idx);
+            if (a.depth != b.depth)
+                return a.depth < b.depth;
+            if (a.x != b.x)
+                return a.x < b.x;
+            return a.y < b.y;
+        }
+    );
+
+    leaf_table[new_list].assign(nx * ny, -1);
+#pragma omp parallel for
+    for (int leaf_idx : cached_leaves_idx) {
+        const auto &leaf = getNode(new_list, leaf_idx);
+
+        int x_start = std::max(0, (int)(leaf.x - leaf.size / 2.f));
+        int x_end   = std::min(nx, (int)(leaf.x + leaf.size / 2.f));
+        int y_start = std::max(0, (int)(leaf.y - leaf.size / 2.f));
+        int y_end   = std::min(ny, (int)(leaf.y + leaf.size / 2.f));
+
+        for (int y = y_start; y < y_end; ++y) {
+            for (int x = x_start; x < x_end; ++x) {
+                leaf_table[new_list][IX(x, y)] = leaf_idx;
+            }
+        }
+    }
+}
+
+void QTSimulator::cacheNeighbors() {
+    /*
+     * Build cache neighbors for nodes in new tree.
+     * Only for new tree -> 1 - root_list
+     */
+
+    int new_list = 1 - root_list;
+#pragma omp parallel for
+    for (int leaf_idx : cached_leaves_idx) {
+        auto &leaf = getNode(new_list, leaf_idx);
+
+        std::vector<std::pair<int, int>> neighbors_idx;
+        getNeighbors(neighbors_idx, new_list, leaf_idx);
+
+        for (auto [dir, node_idx] : neighbors_idx) {
+            leaf.cached_neighbors_idx[leaf.cached_neighbors_cnt++] = node_idx;
+            leaf.neighbor_cnt[dir]++;
+        }
+    }
+}
+
+void QTSimulator::findAllEdges() {
+    /*
+     * Collect all edges in new tree nodes.
+     * Only for new tree -> 1 - root_list
+     */
+
+    int new_list = 1 - root_list;
 
     QTu_new.clear();
     QTv_new.clear();
     for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(list_idx, leaf_idx);
+        auto &leaf = getNode(new_list, leaf_idx);
 
         float half_size = leaf.size / 2.f;
         float quad_size = leaf.size / 4.f;
@@ -343,14 +461,14 @@ void QTSimulator::findAllEdges(int list_idx) {
                 coefs.assign({0});
                 solid_frac = 1;
             } else if (neighbot_cnt == 2) {
-                auto &n_0 = getNode(list_idx, nodes_idx[neighbor_idx]);
+                auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
                 adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
                 adj_cells_idx.push_back(nodes_idx[neighbor_idx + 1]);
 
                 float coef = face_sgn * 1.f / (1.5f * n_0.size);
                 coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
             } else if (neighbot_cnt == 1) {
-                auto &n_0 = getNode(list_idx, nodes_idx[neighbor_idx]);
+                auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
                 if (n_0.depth == leaf.depth) {
                     if (dir <= 1)
                         goto OVERLAY_NODE;
@@ -412,16 +530,17 @@ void QTSimulator::findAllEdges(int list_idx) {
     }
 }
 
-void QTSimulator::advectQuadtreeDatas(float dt, int list_idx) {
+void QTSimulator::advectQuadtreeDatas(float dt) {
     /*
-     * For all leaves.
-     * For all edges.
-     * advect the Phi, Size function and velocity data
+     * Advect old datas to new tree.
+     * Only for new tree -> 1 - root_list
      */
+
+    int new_list = 1 - root_list;
 
 #pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf         = getNode(list_idx, leaf_idx);
+        auto &leaf         = getNode(new_list, leaf_idx);
         auto advected_leaf = advect(leaf.x, leaf.y, dt, OPT_CELL_ALL);
 
         float exp_phi = advected_leaf.phi;
@@ -451,7 +570,7 @@ void QTSimulator::advectQuadtreeDatas(float dt, int list_idx) {
     }
 }
 
-void QTSimulator::QTapplyGravity(float dt) {
+void QTSimulator::applyGravity(float dt) {
     /*
      * For all edges.
      * add gravity on horizontial edges
@@ -468,7 +587,23 @@ void QTSimulator::QTapplyGravity(float dt) {
     }
 }
 
-void QTSimulator::QTproject() {
+void QTSimulator::setBoundaries() {
+    /*
+     * For all edges.
+     * Set the boundary to 0
+     */
+    for (int i = 0; i < QTu.size(); i++) {
+        if (QTu[i].solid_fraction >= 1.f)
+            QTu[i].val = 0.0f;
+    }
+
+    for (int i = 0; i < QTv.size(); i++) {
+        if (QTv[i].solid_fraction >= 1.f)
+            QTv[i].val = 0.0f;
+    }
+}
+
+void QTSimulator::project() {
     /*
      * For all edges.
      * compute pressure and update velocity
@@ -826,19 +961,7 @@ void QTSimulator::FMMSolver(std::vector<std::pair<float, int>> &init_datas) {
     }
 }
 
-// Quad Tree Build Functions
-void QTSimulator::initQuadtree(int max_depth, int list_idx, int node_idx) {
-    if (node_pool[list_idx][node_idx].depth >= max_depth)
-        return;
-
-    subdivideNode(list_idx, node_idx);
-    for (int i = 0; i < 4; i++) {
-        initQuadtree(
-            max_depth, list_idx, node_pool[list_idx][node_idx].children_idx[i]
-        );
-    }
-}
-
+// Util Functions
 void QTSimulator::subdivideNode(int list_idx, int node_idx) {
 
     auto &pool = node_pool[list_idx];
@@ -862,67 +985,6 @@ void QTSimulator::subdivideNode(int list_idx, int node_idx) {
     }
 }
 
-void QTSimulator::smoothing(int list_idx) {
-
-    std::vector<int> leaves;
-    collectLeafNodes(leaves, list_idx);
-
-    auto surfaceFirst = [&](int a_idx, int b_idx) {
-        return std::abs(getNode(list_idx, a_idx).depth) <
-               std::abs(getNode(list_idx, b_idx).depth);
-    };
-    std::priority_queue<int, std::vector<int>, decltype(surfaceFirst)> pq(
-        surfaceFirst, std::move(leaves)
-    );
-
-    while (!pq.empty()) {
-        int node_idx = pq.top();
-        pq.pop();
-
-        float node_x, node_y, node_size;
-        int node_depth;
-        bool node_is_leaf;
-        {
-            auto &node   = getNode(list_idx, node_idx);
-            node_x       = node.x;
-            node_y       = node.y;
-            node_size    = node.size;
-            node_depth   = node.depth;
-            node_is_leaf = node.is_leaf;
-        }
-
-        if (!node_is_leaf)
-            continue;
-
-        float step       = node_size / 2.f + 0.1f;
-        int direction[5] = {1, 0, -1, 0, 1};
-        for (int i = 0; i < 4; i++) {
-            float dx = direction[i] * step;
-            float dy = direction[i + 1] * step;
-
-            float x = node_x + dx;
-            float y = node_y + dy;
-
-            if (x < 0 || x > nx || y < 0 || y > ny)
-                continue;
-
-            int neighbor_idx = getNodeIdxAt(x, y, list_idx);
-            if (neighbor_idx == -1)
-                continue;
-
-            if (node_depth - getNode(list_idx, neighbor_idx).depth > 1) {
-                subdivideNode(list_idx, neighbor_idx);
-                for (int c = 0; c < 4; c++) {
-                    auto &neighbor = getNode(list_idx, neighbor_idx);
-                    auto &child = getNode(list_idx, neighbor.children_idx[c]);
-                    child.phi   = neighbor.phi;
-                    pq.push(neighbor.children_idx[c]);
-                }
-            }
-        }
-    }
-}
-
 void QTSimulator::collectLeafNodes(
     std::vector<int> &leaves_idx, int list_idx
 ) const {
@@ -930,57 +992,6 @@ void QTSimulator::collectLeafNodes(
         auto &node = getNode(list_idx, i);
         if (node.is_leaf)
             leaves_idx.push_back(i);
-    }
-}
-
-void QTSimulator::cacheLeaves(int list_idx) {
-    cached_leaves_idx.clear();
-    collectLeafNodes(cached_leaves_idx, list_idx);
-
-    sort(
-        cached_leaves_idx.begin(),
-        cached_leaves_idx.end(),
-        [&](int a_idx, int b_idx) {
-            auto &a = getNode(list_idx, a_idx);
-            auto &b = getNode(list_idx, b_idx);
-            if (a.depth != b.depth)
-                return a.depth < b.depth;
-            if (a.x != b.x)
-                return a.x < b.x;
-            return a.y < b.y;
-        }
-    );
-
-    leaf_table[list_idx].assign(nx * ny, -1);
-#pragma omp parallel for
-    for (int leaf_idx : cached_leaves_idx) {
-        const auto &leaf = getNode(list_idx, leaf_idx);
-
-        int x_start = std::max(0, (int)(leaf.x - leaf.size / 2.f));
-        int x_end   = std::min(nx, (int)(leaf.x + leaf.size / 2.f));
-        int y_start = std::max(0, (int)(leaf.y - leaf.size / 2.f));
-        int y_end   = std::min(ny, (int)(leaf.y + leaf.size / 2.f));
-
-        for (int y = y_start; y < y_end; ++y) {
-            for (int x = x_start; x < x_end; ++x) {
-                leaf_table[list_idx][IX(x, y)] = leaf_idx;
-            }
-        }
-    }
-}
-
-void QTSimulator::cacheNeighbors(int list_idx) {
-#pragma omp parallel for
-    for (int leaf_idx : cached_leaves_idx) {
-        auto &leaf = getNode(list_idx, leaf_idx);
-
-        std::vector<std::pair<int, int>> neighbors_idx;
-        getNeighbors(neighbors_idx, list_idx, leaf_idx);
-
-        for (auto [dir, node_idx] : neighbors_idx) {
-            leaf.cached_neighbors_idx[leaf.cached_neighbors_cnt++] = node_idx;
-            leaf.neighbor_cnt[dir]++;
-        }
     }
 }
 
@@ -1119,19 +1130,6 @@ QTSimulator::advect(float x, float y, float dt, uint32_t opts) {
     float past_y = std::clamp(y - v_val * dt, 0.0f, (float)ny);
 
     return MLSinterpolate(past_x, past_y, opts);
-}
-
-float QTSimulator::getVelocity(std::vector<QuadtreeEdge> &field, int id) {
-    if (id == -1)
-        return 0.0f;
-    return field[id].val;
-}
-
-float QTSimulator::distance2(float x1, float y1, float x2, float y2) {
-    /*
-     * Return the square of distance between two point
-     */
-    return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
 }
 
 // ######################### MLS #########################

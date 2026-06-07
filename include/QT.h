@@ -47,9 +47,9 @@ struct InterpolatedData {
 };
 
 struct MLSSamplePoint {
-    float x, y;         // 採樣點的物理座標（細胞中心或邊中心）
-    float h;            // 該點對應的網格尺寸
-    float val_1, val_2; // 該點的數值
+    float x, y;
+    float h;
+    float val_1, val_2;
 };
 
 enum InterpOptions : uint32_t {
@@ -70,16 +70,17 @@ enum InterpOptions : uint32_t {
 
 class QTSimulator : public BaseSimulator {
   private:
-    // QuadtreeNode *root;
+    // Simulator datas
+    int nx, ny;
     int root_list;
     std::vector<QuadtreeNode> node_pool[2];
-    int nx, ny;
 
+    // Interact datas
     bool add_water = false;
     bool del_water = false;
     float water_x, water_y, water_radius;
 
-    // QT grid data
+    // Quad Tree datas
     // u for row velocity
     // v for column velocity
     std::vector<int> phash_head, phash_next;
@@ -91,62 +92,63 @@ class QTSimulator : public BaseSimulator {
         solver;
     std::vector<QuadtreeEdge> QTu, QTv, QTu_new, QTv_new;
 
-    std::vector<Particle> particle_place_holder; // just for Renderer
-
-    // Quad Tree simulation functions
+    // Quad Tree simulation pipeline functions
     void computeSizingFunction(float dt);
     void propagateSizingFunction();
-    void QTapplyGravity(float dt);
-    void QTproject();
-    void redistancing();
-    void findAllEdges(int list_idx);
-    void advectQuadtreeDatas(float dt, int list_idx);
+    void recursiveBuildTree(float dt, int node_idx = 0);
+    void smoothing();
+    void cacheNeighbors();
+    void cacheLeaves();
+    void findAllEdges();
+    void advectQuadtreeDatas(float dt);
+    void applyGravity(float dt);
     void setBoundaries();
+    void project();
     void velExtrapolation();
+    void redistancing();
+    void FMMSolver(std::vector<std::pair<float, int>> &init_datas);
 
-    // Quad Tree functions
+    // Quad Tree manipulate functions
+    void initQuadtree(int max_depth, int list_idx, int node_idx = 0);
     int allocate(float x, float y, float size, int depth, int list_idx) {
         int idx = node_pool[list_idx].size();
         node_pool[list_idx].push_back({x, y, size, depth});
         return idx;
     }
+    void subdivideNode(int list_idx, int node_idx = 0);
     QuadtreeNode &getNode(int list_idx, int node_idx) {
         return node_pool[list_idx][node_idx];
     }
     const QuadtreeNode &getNode(int list_idx, int node_idx = 0) const {
         return node_pool[list_idx][node_idx];
     }
-    void initQuadtree(int max_depth, int list_idx, int node_idx = 0);
-    void subdivideNode(int list_idx, int node_idx = 0);
-    void smoothing(int list_idx);
-    void recursiveGetLines(
-        std::vector<Line> &lines, int list_idx, int node_idx = 0
-    ) const;
-    void recursiveBuildTree(float dt, int list_idx, int node_idx = 0);
-    void cacheNeighbors(int list_idx);
-    void cacheLeaves(int list_idx);
     int getNodeIdxAt(float x, float y, int list_idx, int node_idx = 0) const;
     void getNodesIdxIn(
         float x, float y, float radius_ratio, std::vector<int> &nodes_idx
     );
+    void collectLeafNodes(std::vector<int> &leaves_idx, int list_idx) const;
     void getNeighbors(
         std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
     );
-    void collectLeafNodes(std::vector<int> &leaves_idx, int list_idx) const;
 
     // util functions
-    float distance2(float x1, float y1, float x2, float y2);
-    float getVelocity(std::vector<QuadtreeEdge> &field, int id);
+    inline int IX(int i, int j) const { return i + j * nx; }
+    inline float distance2(float x1, float y1, float x2, float y2) {
+        return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
+    }
+    inline float getVelocity(std::vector<QuadtreeEdge> &field, int id) {
+        return (id == -1 ? 0.0f : field[id].val);
+    }
+    inline float circleSDF(float x, float y) {
+        return std::sqrt(distance2(x, y, water_x, water_y)) - water_radius;
+    };
+
+    // MLS interpolate functions
     InterpolatedData
     advect(float x, float y, float dt, uint32_t opts = OPT_ALL);
-    int IX(int i, int j) const { return i + j * nx; }
-    float circleSDF(float x, float y) {
-        return std::sqrt(
-                   (x - water_x) * (x - water_x) + (y - water_y) * (y - water_y)
-               ) -
-               water_radius;
-    };
     InterpolatedData MLSinterpolate(float x, float y, uint32_t opts = OPT_ALL);
+    std::pair<float, float>
+    solveMLS(float x, float y, const std::vector<MLSSamplePoint> &samples);
     void
     MLSMirrorNode(std::vector<MLSSamplePoint> &sample_points, int node_idx);
     void MLSMirrorEdge(
@@ -156,9 +158,12 @@ class QTSimulator : public BaseSimulator {
         std::vector<QuadtreeEdge> &field,
         bool is_u
     );
-    std::pair<float, float>
-    solveMLS(float x, float y, const std::vector<MLSSamplePoint> &samples);
-    void FMMSolver(std::vector<std::pair<float, int>> &init_datas);
+
+    // Renderer data/functions
+    std::vector<Particle> particle_place_holder; // just for Renderer
+    void recursiveGetLines(
+        std::vector<Line> &lines, int list_idx, int node_idx = 0
+    ) const;
 
   public:
     QTSimulator(int width, int height);
@@ -185,7 +190,6 @@ class QTSimulator : public BaseSimulator {
     }
     std::vector<Line> getLines() const override;
     bool is_water(int x, int y) const override {
-        // std::cout << node_pool[root_list].size() << std::endl;
         int idx = getNodeIdxAt(x + 0.5, y + 0.5, root_list);
         return getNode(root_list, idx).phi <= 0;
     }

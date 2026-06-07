@@ -52,6 +52,11 @@ struct MLSSamplePoint {
     float val_1, val_2;
 };
 
+struct NeighborDatas {
+    float distance[4];
+    float phi[4];
+};
+
 enum InterpOptions : uint32_t {
     OPT_NONE  = 0,
     OPT_S     = 1 << 0,
@@ -130,6 +135,7 @@ class QTSimulator : public BaseSimulator {
     void getNeighbors(
         std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
     );
+    NeighborDatas getNeighborDatas(int node_idx);
 
     // util functions
     inline int IX(int i, int j) const { return i + j * nx; }

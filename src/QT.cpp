@@ -150,32 +150,31 @@ void QTSimulator::computeSizingFunction(float dt) {
             float gamma_phi = 4.f;
             float gamma_u   = 3.f;
 
-            // // 0: left
-            // // 1: up
-            // // 2: right
-            // // 3: down
-            // NeighborData L = getNeighborData(leaf, 0);
-            // NeighborData U = getNeighborData(leaf, 1);
-            // NeighborData R = getNeighborData(leaf, 2);
-            // NeighborData D = getNeighborData(leaf, 3);
-            //
-            // float f_C = leaf.phi;
-            // float d2f_dx2 =
-            //     2.0f * (L.datas.phi / (L.distance * (L.distance +
-            //     R.distance)) -
-            //             f_C / (L.distance * R.distance) +
-            //             R.datas.phi / (R.distance * (L.distance +
-            //             R.distance)));
-            // float d2f_dy2 =
-            //     2.0f * (D.datas.phi / (D.distance * (D.distance +
-            //     U.distance)) -
-            //             f_C / (D.distance * U.distance) +
-            //             U.datas.phi / (U.distance * (D.distance +
-            //             U.distance)));
-            //
-            // float laplacian = std::abs(d2f_dx2 + d2f_dy2);
-            // float geom_term = gamma_phi * laplacian;
-            float geom_term = gamma_phi / (std::abs(leaf.phi) + 0.1f);
+            // 0: left
+            // 1: up
+            // 2: right
+            // 3: down
+            NeighborDatas ndatas = getNeighborDatas(leaf_idx);
+
+            float L_phi = ndatas.phi[0];
+            float L_dis = ndatas.distance[0];
+            float U_phi = ndatas.phi[1];
+            float U_dis = ndatas.distance[1];
+            float R_phi = ndatas.phi[2];
+            float R_dis = ndatas.distance[2];
+            float D_phi = ndatas.phi[3];
+            float D_dis = ndatas.distance[3];
+
+            float f_C     = leaf.phi;
+            float d2f_dx2 = 2.0f * (L_phi / (L_dis * (L_dis + R_dis)) -
+                                    f_C / (L_dis * R_dis) +
+                                    R_phi / (R_dis * (L_dis + R_dis)));
+            float d2f_dy2 = 2.0f * (D_phi / (D_dis * (D_dis + U_dis)) -
+                                    f_C / (D_dis * U_dis) +
+                                    U_phi / (U_dis * (D_dis + U_dis)));
+
+            float laplacian = std::abs(d2f_dx2 + d2f_dy2);
+            float geom_term = gamma_phi * laplacian;
 
             float ul = getVelocity(QTu, leaf.ul_id);
             float ur = getVelocity(QTu, leaf.ur_id);
@@ -187,12 +186,7 @@ void QTSimulator::computeSizingFunction(float dt) {
 
             float vel_term = gamma_u * std::sqrt(du_dx * du_dx + dv_dy * dv_dy);
 
-            float S = geom_term + vel_term;
-
-            auto data    = advect(leaf.x, leaf.y, dt, OPT_S);
-            float S_star = data.S;
-
-            leaf.S_new = std::max(R_t * S_star, S);
+            leaf.S_new = geom_term + vel_term;
         } else {
             leaf.S_new = 0.0f;
         }
@@ -201,7 +195,11 @@ void QTSimulator::computeSizingFunction(float dt) {
 #pragma omp parallel for
     for (int leaf_idx : cached_leaves_idx) {
         auto &leaf = getNode(root_list, leaf_idx);
-        leaf.S     = leaf.S_new;
+
+        auto data    = advect(leaf.x, leaf.y, dt, OPT_S);
+        float S_star = data.S;
+
+        leaf.S = std::max(R_t * S_star, leaf.S_new);
     }
 }
 
@@ -265,10 +263,10 @@ void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
             exp_phi = std::min(exp_phi, water_phi);
         if (del_water)
             exp_phi = std::max(exp_phi, -water_phi);
+        exp_S = std::max(exp_S, 1.f / node.size + 1);
     }
 
-    // if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
-    if (std::abs(exp_phi) < node.size) {
+    if (std::abs(exp_phi) < node.size && exp_S > (1.f / node.size)) {
         subdivideNode(new_list, node_idx);
 
         for (int i = 0; i < 4; i++) {
@@ -1116,6 +1114,39 @@ void QTSimulator::getNodesIdxIn(
 
     for (int idx : nodes_idx)
         visited[idx] = false;
+}
+
+NeighborDatas QTSimulator::getNeighborDatas(int node_idx) {
+
+    NeighborDatas result;
+    auto &node      = getNode(root_list, node_idx);
+    auto &neigh_idx = node.cached_neighbors_idx;
+    int idx         = 0;
+
+    for (int dir = 0; dir < 4; dir++) {
+        int neigh_cnt = node.neighbor_cnt[dir];
+        if (neigh_cnt == 2) {
+            auto &n0 = getNode(root_list, neigh_idx[idx]);
+            auto &n1 = getNode(root_list, neigh_idx[idx + 1]);
+
+            result.distance[dir] = node.size * 0.75f;
+            result.phi[dir]      = (n0.phi + n1.phi) * 0.5f;
+        } else if (neigh_cnt == 1) {
+            auto &n0 = getNode(root_list, neigh_idx[idx]);
+            if (n0.size == node.size) {
+                result.distance[dir] = node.size;
+                result.phi[dir]      = n0.phi;
+            } else {
+                result.distance[dir] = node.size * 1.5f;
+                result.phi[dir]      = n0.phi;
+            }
+        } else {
+            result.distance[dir] = node.size;
+            result.phi[dir]      = node.phi;
+        }
+        idx += neigh_cnt;
+    }
+    return result;
 }
 
 InterpolatedData

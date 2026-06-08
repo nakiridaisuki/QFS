@@ -248,6 +248,7 @@ void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
 
     int new_list = 1 - root_list;
     auto &node   = getNode(new_list, node_idx);
+
     if (node.size < 1.5f)
         return;
 
@@ -259,6 +260,11 @@ void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
 
     if (add_water || del_water) {
         float water_phi = circleSDF(node.x, node.y);
+
+        if (add_water && water_phi < exp_phi)
+            node.is_new = true;
+        if (del_water && -water_phi > exp_phi)
+            node.is_new = true;
 
         if (add_water)
             exp_phi = std::min(exp_phi, water_phi);
@@ -486,7 +492,9 @@ void QTSimulator::findAllEdges() {
 
             float half_size = leaf.size / 2.f;
             float x = leaf.x, y = leaf.y, solid_frac = 0;
-            int face_sgn                   = (dir <= 1) ? -1 : 1;
+            bool is_new  = false;
+            int face_sgn = (dir <= 1) ? -1 : 1;
+
             std::vector<int> adj_cells_idx = {leaf_idx};
             std::vector<float> coefs;
 
@@ -502,8 +510,10 @@ void QTSimulator::findAllEdges() {
                 creates_edge = true;
             } else if (neighbot_cnt == 2) {
                 auto &n_0 = getNode(new_list, nodes_idx[neighbor_idx]);
+                auto &n_1 = getNode(new_list, nodes_idx[neighbor_idx + 1]);
                 adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
                 adj_cells_idx.push_back(nodes_idx[neighbor_idx + 1]);
+                is_new = n_0.is_new | n_1.is_new;
 
                 float coef = face_sgn * 1.f / (1.5f * n_0.size);
                 coefs.assign({-1.f * coef, 0.5f * coef, 0.5f * coef});
@@ -513,6 +523,8 @@ void QTSimulator::findAllEdges() {
                 if (n_0.depth == leaf.depth) {
                     if (dir > 1) {
                         adj_cells_idx.push_back(nodes_idx[neighbor_idx]);
+                        is_new = n_0.is_new;
+
                         float coef = face_sgn * 1.f / leaf.size;
                         coefs.assign({-coef, coef});
                         creates_edge = true;
@@ -530,6 +542,7 @@ void QTSimulator::findAllEdges() {
                         solid_frac,
                         adj_cells_idx,
                         coefs,
+                        is_new,
                     };
                     if (dir == 1)
                         leaf.vl_id = v_idx;
@@ -545,6 +558,7 @@ void QTSimulator::findAllEdges() {
                         solid_frac,
                         adj_cells_idx,
                         coefs,
+                        is_new,
                     };
                     if (dir == 0)
                         leaf.ul_id = u_idx;
@@ -634,12 +648,14 @@ void QTSimulator::advectQuadtreeDatas(float dt) {
 #pragma omp parallel for
     for (auto &face : QTu_new) {
         auto advected_face = advect(face.x, face.y, dt, OPT_U_ALL);
-        face.val           = advected_face.u;
+        if (!face.is_new)
+            face.val = advected_face.u;
     }
 #pragma omp parallel for
     for (auto &face : QTv_new) {
         auto advected_face = advect(face.x, face.y, dt, OPT_V_ALL);
-        face.val           = advected_face.v;
+        if (!face.is_new)
+            face.val = advected_face.v;
     }
 }
 
@@ -663,8 +679,6 @@ void QTSimulator::applyGravity(float dt) {
 void QTSimulator::applySurfaceTension(float dt) {
     if (Sigma <= 0.0f)
         return;
-
-    std::cout << Sigma << std::endl;
 
     // 1. 計算所有葉子節點的曲率 (只針對靠近交界面的節點進行計算以節省效能)
     std::vector<float> leaf_H(node_pool[root_list].size(), 0.0f);
@@ -697,17 +711,19 @@ void QTSimulator::applySurfaceTension(float dt) {
     // 2. 更新水平面速度 (QTu)
 #pragma omp parallel for
     for (size_t k = 0; k < QTu.size(); ++k) {
-        auto &face          = QTu[k];
-        bool near_interface = false;
+        auto &face      = QTu[k];
+        bool has_liquid = false;
+        bool has_gas    = false;
         for (int cell_idx : face.adj_cells_idx) {
-            if (std::abs(getNode(root_list, cell_idx).phi) <
-                face.length * 2.0f) {
-                near_interface = true;
-                break;
+            if (getNode(root_list, cell_idx).phi <= 0.0f) {
+                has_liquid = true;
+            } else {
+                has_gas = true;
             }
         }
-        if (!near_interface)
-            continue;
+        if (!has_liquid || !has_gas) {
+            continue; // 若不跨越交界面（全為液體或全為空氣），則跳過
+        }
 
         float W_prime = std::max(compute_Wk(face), 0.01f);
         float grad_H  = 0.0f;
@@ -727,17 +743,19 @@ void QTSimulator::applySurfaceTension(float dt) {
     // 3. 更新垂直面速度 (QTv)
 #pragma omp parallel for
     for (size_t k = 0; k < QTv.size(); ++k) {
-        auto &face          = QTv[k];
-        bool near_interface = false;
+        auto &face      = QTv[k];
+        bool has_liquid = false;
+        bool has_gas    = false;
         for (int cell_idx : face.adj_cells_idx) {
-            if (std::abs(getNode(root_list, cell_idx).phi) <
-                face.length * 2.0f) {
-                near_interface = true;
-                break;
+            if (getNode(root_list, cell_idx).phi <= 0.0f) {
+                has_liquid = true;
+            } else {
+                has_gas = true;
             }
         }
-        if (!near_interface)
-            continue;
+        if (!has_liquid || !has_gas) {
+            continue; // 若不跨越交界面（全為液體或全為空氣），則跳過
+        }
 
         float W_prime = std::max(compute_Wk(face), 0.01f);
         float grad_H  = 0.0f;
@@ -833,7 +851,8 @@ void QTSimulator::project() {
     auto addFace = [&](QuadtreeEdge &face,
                        std::vector<Eigen::Triplet<float>> &local_trip) {
         float u_star = face.val;
-        float VA     = face.length * (1.f - face.solid_fraction);
+        float VA =
+            3.f * face.length * face.length * (1.f - face.solid_fraction);
 
         bool has_fluid = false;
         for (int cell_idx : face.adj_cells_idx)
@@ -925,7 +944,7 @@ void QTSimulator::project() {
 
 void QTSimulator::velExtrapolation() {
 
-    const int ITER = 10;
+    const int ITER = 3;
 
     std::queue<std::pair<int, int>> Q;
     for (int leaf_idx : cached_leaves_idx) {

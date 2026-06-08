@@ -15,6 +15,7 @@ struct QuadtreeNode {
     int depth;
 
     bool is_leaf = true;
+    bool is_new  = false;
     bool known   = false;
     int children_idx[4];
 
@@ -37,6 +38,7 @@ struct QuadtreeEdge {
     float solid_fraction = 0;
     std::vector<int> adj_cells_idx;
     std::vector<float> grad_coeff;
+    bool is_new   = false;
     float val_old = 0;
 };
 

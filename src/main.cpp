@@ -2,6 +2,7 @@
 #include "GUI.h"
 #include "MAC.h"
 #include "QT.h"
+#include "Recorder.h"
 #include "Renderer.h"
 #include <algorithm>
 #include <vector>
@@ -29,7 +30,8 @@ int main() {
     // BaseSimulator *sim = new MACSimulator(simWidth, simHeight);
     BaseSimulator *sim = new QTSimulator(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
-    SimulatorUI gui(sim, renderer, resolutions);
+    Recorder recorder(FPS);
+    SimulatorUI gui(sim, renderer, recorder, resolutions);
 
     // 2. 設定 raygui 的全域字體大小與樣式 (選擇性)
     GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
@@ -73,6 +75,9 @@ int main() {
             float frameTime = std::min(GetFrameTime(), 0.01667f);
             sim->update(frameTime);
         }
+
+        if (recorder.isRecording())
+            recorder.RecordFrame();
 
         // 4. 渲染畫面與 UI
         BeginDrawing();

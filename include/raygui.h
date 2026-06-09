@@ -1,3 +1,4 @@
+#pragma once
 /*******************************************************************************************
 *
 *   raygui v5.0-dev - A simple and easy-to-use immediate-mode gui library

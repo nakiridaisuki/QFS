@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Base.h"
+#include "Recorder.h"
 #include "Renderer.h"
 #include "raygui.h"
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -22,10 +24,12 @@ class SimulatorUI {
     };
 
     float global_y_gap = 2;
+    char time_buf[128];
 
   public:
     BaseSimulator *sim;
     FluidRenderer &renderer;
+    Recorder &recorder;
     float brushRadius;
     float gravity;
     float tension;
@@ -46,9 +50,10 @@ class SimulatorUI {
     SimulatorUI(
         BaseSimulator *sim,
         FluidRenderer &renderer,
+        Recorder &recorder,
         std::vector<int> resolutions
     )
-        : sim(sim), renderer(renderer) {
+        : sim(sim), renderer(renderer), recorder(recorder) {
 
         // Define init value
         brushRadius = 4.0f;
@@ -130,6 +135,15 @@ class SimulatorUI {
 
             if (showDebug)
                 curr_y = drawPackedCheckBoxes(20, curr_y, debug_checkbox);
+
+            if (GuiButton(Rectangle{20, curr_y, 100, 20}, "Start recording")) {
+                GetCurrentTimestamp();
+                recorder.StartRecording(strcat(time_buf, ".mp4"));
+            }
+            if (GuiButton(Rectangle{130, curr_y, 100, 20}, "Stop recording")) {
+                recorder.StopRecording();
+            }
+            updateY(curr_y, 20);
         }
     }
 
@@ -187,5 +201,18 @@ class SimulatorUI {
         if (!is_left)
             currY += global_y_gap + height;
         return currY;
+    }
+
+    void GetCurrentTimestamp() {
+        std::time_t now = std::time(nullptr);
+
+#ifdef _WIN32
+        struct tm timeinfo;
+        localtime_s(&timeinfo, &now);
+        std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &timeinfo);
+#else
+        struct tm *timeinfo = std::localtime(&now);
+        std::strftime(time_buf, sizeof(time_buf), "%Y%m%d_%H%M%S", timeinfo);
+#endif
     }
 };

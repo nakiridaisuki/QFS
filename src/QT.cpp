@@ -14,7 +14,9 @@
 #include <vector>
 
 // PUBLIC
-QTSimulator::QTSimulator(int width, int height) : nx(width), ny(height) {
+QTSimulator::QTSimulator(int width, int height) : BaseSimulator(width, height) {
+    simulator_type = SimType::QT;
+
     phash_head.resize(nx * ny, -1);
     phash_next.clear();
     leaf_table[0].resize(nx * ny, -1);

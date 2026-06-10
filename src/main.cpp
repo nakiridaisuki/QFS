@@ -1,6 +1,7 @@
 #include "Base.h"
 #include "GUI.h"
-#include "MAC.h"
+#include "MAC/Eulerian.h"
+#include "MAC/FLIP.h"
 #include "QT.h"
 #include "Recorder.h"
 #include "Renderer.h"
@@ -17,7 +18,7 @@ int main() {
 
     const std::vector<int> resolutions = {64, 128, 256, 512, 1024};
 
-    int simWidth  = 512;
+    int simWidth  = 128;
     int simHeight = simWidth;
 
     InitWindow(
@@ -25,9 +26,7 @@ int main() {
     );
     SetTargetFPS(FPS);
 
-    int simType = SimType::MAC;
-
-    // BaseSimulator *sim = new MACSimulator(simWidth, simHeight);
+    // BaseSimulator *sim = new MACEulerian(simWidth, simHeight);
     BaseSimulator *sim = new QTSimulator(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
     Recorder recorder(FPS);
@@ -97,16 +96,16 @@ int main() {
         if (gui.need_reset) {
             int new_size = gui.new_sim_size;
             int new_type = gui.new_sim_type;
-            if (new_size == simWidth && new_type == simType) {
+            if (new_size == simWidth && new_type == sim->getSimType()) {
                 sim->reset();
             } else {
-
-                simType  = new_type;
                 simWidth = simHeight = resolutions[new_size];
 
                 delete sim;
-                if (simType == SimType::MAC)
-                    sim = new MACSimulator(simWidth, simHeight);
+                if (new_type == SimType::MAC_Eulerian)
+                    sim = new MACEulerian(simWidth, simHeight);
+                else if (new_type == SimType::MAC_FLIP)
+                    sim = new MACFLIP(simWidth, simHeight);
                 else
                     sim = new QTSimulator(simWidth, simHeight);
 

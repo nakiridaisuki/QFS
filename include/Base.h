@@ -2,6 +2,10 @@
 
 #include <vector>
 
+namespace SimType {
+enum SimulatorType { MAC_Eulerian = 0, MAC_FLIP = 1, QT = 2 };
+}
+
 struct Particle {
     float x, y;
     float u, v;
@@ -13,14 +17,15 @@ struct Line {
 
 class BaseSimulator {
   protected:
-    int PCGItertimes;
+    int nx, ny;
+    int PCGItertimes = 0;
     float G;     // Gravity const
     float Sigma; // surface tension
+    int simulator_type;
 
   public:
+    BaseSimulator(int width, int height) : nx(width), ny(height) {}
     virtual ~BaseSimulator()                                  = default;
-    virtual int getWidth() const                              = 0;
-    virtual int getHeight() const                             = 0;
     virtual const std::vector<Particle> &getParticles() const = 0;
     virtual std::vector<Line> getLines() const                = 0;
     virtual bool is_water(int x, int y) const                 = 0;
@@ -30,6 +35,9 @@ class BaseSimulator {
     float getGravity() { return G; }
     float getSurfaceTension() { return Sigma; }
     int getPCGIter() { return PCGItertimes; }
+    int getWidth() const { return nx; }
+    int getHeight() const { return ny; }
+    int getSimType() const { return simulator_type; }
 
     void setGravity(float gravity) { G = gravity; }
     void setSigma(float sigma) { Sigma = sigma; }

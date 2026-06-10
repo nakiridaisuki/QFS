@@ -78,7 +78,6 @@ enum InterpOptions : uint32_t {
 class QTSimulator : public BaseSimulator {
   private:
     // Simulator datas
-    int nx, ny;
     int root_list;
     std::vector<QuadtreeNode> node_pool[2];
 
@@ -184,8 +183,6 @@ class QTSimulator : public BaseSimulator {
     void delWater(float x, float y, float radius) override;
 
     // get functions for renderer
-    int getWidth() const override { return nx; }
-    int getHeight() const override { return ny; }
     const std::vector<QuadtreeEdge> &getUVs(bool is_u = false) const {
         if (is_u)
             return QTu;

@@ -8,10 +8,6 @@
 #include <string>
 #include <vector>
 
-namespace SimType {
-enum SimulatorType { MAC = 0, QT = 1 };
-}
-
 class SimulatorUI {
     struct PackedSliderElement {
         const char *textLeft;
@@ -127,7 +123,9 @@ class SimulatorUI {
             updateY(curr_y, 20);
 
             GuiComboBox(
-                Rectangle{20, curr_y, 120, 20}, "MAC;Quadtree", &new_sim_type
+                Rectangle{20, curr_y, 120, 20},
+                "MAC Eulerian; MAC FLIP;Quadtree",
+                &new_sim_type
             );
             need_reset =
                 GuiButton(Rectangle{150, curr_y, 100, 20}, "Reset Fluid");

@@ -29,6 +29,7 @@ struct QuadtreeNode {
     int cached_neighbors_cnt = 0;
     int neighbor_cnt[4]      = {0};
     int fluid_id             = -1;
+    int particle_cnt         = 0;
 };
 
 struct QuadtreeEdge {
@@ -75,8 +76,8 @@ enum InterpOptions : uint32_t {
     OPT_ALL      = OPT_CELL_ALL | OPT_VEL_ALL
 };
 
-class QTSimulator : public BaseSimulator {
-  private:
+class QTSimulatorBase : public BaseSimulator {
+  protected:
     // Simulator datas
     int root_list;
     std::vector<QuadtreeNode> node_pool[2];
@@ -89,7 +90,6 @@ class QTSimulator : public BaseSimulator {
     // Quad Tree datas
     // u for row velocity
     // v for column velocity
-    std::vector<int> phash_head, phash_next;
     std::vector<int> cached_leaves_idx, leaf_table[2];
     std::vector<Eigen::Triplet<float>> QTtriplets;
     Eigen::ConjugateGradient<
@@ -98,22 +98,30 @@ class QTSimulator : public BaseSimulator {
         solver;
     std::vector<QuadtreeEdge> QTu, QTv, QTu_new, QTv_new;
 
+    // Some local variables
+    std::vector<int> leaf_fluid_id_offset;
+    std::vector<int> leaf_offset, node_offset;
+    std::vector<std::vector<Eigen::Triplet<float>>> thread_triplets;
+
     // Quad Tree simulation pipeline functions
+    void buildNewTree(float dt);
+    void applyGravity(float dt);
+    void applySurfaceTension(float dt);
+    void project();
+    void setBoundaries();
+    void velExtrapolation();
+    void redistancing();
+    void FMMSolver(std::vector<std::pair<float, int>> &init_datas);
+
+    // Build New Tree
     void computeSizingFunction(float dt);
     void propagateSizingFunction();
-    void recursiveBuildTree(float dt, int node_idx = 0);
+    virtual void recursiveBuildTree(float dt, int node_idx = 0) = 0;
     void smoothing();
     void cacheNeighbors();
     void cacheLeaves();
     void findAllEdges();
     void advectQuadtreeDatas(float dt);
-    void applyGravity(float dt);
-    void applySurfaceTension(float dt);
-    void setBoundaries();
-    void project();
-    void velExtrapolation();
-    void redistancing();
-    void FMMSolver(std::vector<std::pair<float, int>> &init_datas);
 
     // Quad Tree manipulate functions
     void initQuadtree(int max_depth, int list_idx, int node_idx = 0);
@@ -133,7 +141,7 @@ class QTSimulator : public BaseSimulator {
     void getNodesIdxIn(
         float x, float y, float radius_ratio, std::vector<int> &nodes_idx
     );
-    void collectLeafNodes(std::vector<int> &leaves_idx, int list_idx) const;
+    void collectLeafNodes(std::vector<int> &leaves_idx, int list_idx);
     void getNeighbors(
         std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
     );
@@ -151,6 +159,7 @@ class QTSimulator : public BaseSimulator {
         return std::sqrt(distance2(x, y, water_x, water_y)) - water_radius;
     };
     float computeCurvature(float x, float y, float size);
+    float computeWk(QuadtreeEdge &face);
 
     // MLS interpolate functions
     InterpolatedData
@@ -170,15 +179,13 @@ class QTSimulator : public BaseSimulator {
     );
 
     // Renderer data/functions
-    std::vector<Particle> particle_place_holder; // just for Renderer
     void recursiveGetLines(
         std::vector<Line> &lines, int list_idx, int node_idx = 0
     ) const;
 
   public:
-    QTSimulator(int width, int height);
+    QTSimulatorBase(int width, int height);
 
-    void update(float dt) override; // update every frame
     void addWater(float x, float y, float radius) override;
     void delWater(float x, float y, float radius) override;
 
@@ -193,8 +200,8 @@ class QTSimulator : public BaseSimulator {
         int idx = getNodeIdxAt(x, y, root_list);
         return getNode(root_list, idx);
     };
-    const std::vector<Particle> &getParticles() const override {
-        return particle_place_holder;
+    const std::vector<Particle> *getParticles() const override {
+        return nullptr;
     }
     std::vector<Line> getLines() const override;
     bool is_water(int x, int y) const override {

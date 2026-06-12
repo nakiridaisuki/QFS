@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Base.h"
-#include "QT.h"
+#include "QT/base.h"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -103,34 +103,9 @@ class FluidRenderer {
         float scaleX = (float)screenWidth / nx;
         float scaleY = (float)screenHeight / ny;
 
-        if (showGrid) {
-            Color gridColor = Fade(DARKGRAY, 0.8f); // 使用半透明的深灰色
-
-            auto lines = sim->getLines();
-            for (auto line : lines) {
-                DrawLine(
-                    line.x1 * scaleX,
-                    line.y1 * scaleY,
-                    line.x2 * scaleX,
-                    line.y2 * scaleY,
-                    gridColor
-                );
-            }
-        }
-
-        if (showParticle) {
-            auto &particles = sim->getParticles();
-            for (auto &p : particles) {
-                float px = p.x * scaleX;
-                float py = p.y * scaleY;
-
-                DrawPixel((int)px, (int)py, RED);
-            }
-        }
-
-        const QTSimulator *qt_sim = nullptr;
+        const QTSimulatorBase *qt_sim = nullptr;
         if (showPhi || showVelocity) {
-            qt_sim = dynamic_cast<const QTSimulator *>(sim);
+            qt_sim = dynamic_cast<const QTSimulatorBase *>(sim);
             if (!qt_sim)
                 std::cout << "Cast failed: sim is not a QTSimulator!"
                           << std::endl;
@@ -155,7 +130,7 @@ class FluidRenderer {
                     unsigned char value =
                         std::clamp(int(fraction * 255.f), 0, 255);
                     if (phi <= 0.f)
-                        color = Color{0, value, 0, 255};
+                        color = Color{0, 0, value, 255};
                     else
                         color = Color{value, 0, 0, 255};
 
@@ -169,7 +144,7 @@ class FluidRenderer {
             DrawTexturePro(texture, source, dest, {0, 0}, 0.0f, WHITE);
         }
 
-        if (showVelocity) {
+        if (showVelocity && qt_sim) {
 
             auto &ufield     = qt_sim->getUVs(true);
             float velo_scale = 0.1f;
@@ -186,6 +161,33 @@ class FluidRenderer {
                 float py = e.y * scaleY;
 
                 DrawVectorArrow({px, py}, {0, e.val}, velo_scale, GREEN);
+            }
+        }
+
+        if (showGrid) {
+            Color gridColor = Fade(DARKGRAY, 0.8f); // 使用半透明的深灰色
+
+            auto lines = sim->getLines();
+            for (auto line : lines) {
+                DrawLine(
+                    line.x1 * scaleX,
+                    line.y1 * scaleY,
+                    line.x2 * scaleX,
+                    line.y2 * scaleY,
+                    gridColor
+                );
+            }
+        }
+
+        if (showParticle) {
+            auto particles_ptr = sim->getParticles();
+            if (particles_ptr != nullptr) {
+                for (auto &p : *particles_ptr) {
+                    float px = p.x * scaleX;
+                    float py = p.y * scaleY;
+
+                    DrawPixel((int)px, (int)py, RED);
+                }
             }
         }
     }

@@ -3,7 +3,12 @@
 #include <vector>
 
 namespace SimType {
-enum SimulatorType { MAC_Eulerian = 0, MAC_FLIP = 1, QT = 2 };
+enum SimulatorType {
+    MAC_Eulerian = 0,
+    MAC_FLIP     = 1,
+    QT_Eulerian  = 2,
+    QT_EXNBFLIP  = 3
+};
 }
 
 struct Particle {
@@ -25,16 +30,18 @@ class BaseSimulator {
 
   public:
     BaseSimulator(int width, int height) : nx(width), ny(height) {}
-    virtual ~BaseSimulator()                                  = default;
-    virtual const std::vector<Particle> &getParticles() const = 0;
-    virtual std::vector<Line> getLines() const                = 0;
-    virtual bool is_water(int x, int y) const                 = 0;
-    virtual void update(float dt)                             = 0;
+    virtual ~BaseSimulator() = default;
+    virtual const std::vector<Particle> *getParticles() const {
+        return nullptr;
+    }
+    virtual std::vector<Line> getLines() const = 0;
+    virtual bool is_water(int x, int y) const  = 0;
+    virtual void update(float dt)              = 0;
 
     // get functions for main loop
-    float getGravity() { return G; }
-    float getSurfaceTension() { return Sigma; }
-    int getPCGIter() { return PCGItertimes; }
+    float getGravity() const { return G; }
+    float getSurfaceTension() const { return Sigma; }
+    int getPCGIter() const { return PCGItertimes; }
     int getWidth() const { return nx; }
     int getHeight() const { return ny; }
     int getSimType() const { return simulator_type; }

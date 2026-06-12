@@ -1,4 +1,4 @@
-#include "QT.h"
+#include "QT/base.h"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cassert>
@@ -14,11 +14,9 @@
 #include <vector>
 
 // PUBLIC
-QTSimulator::QTSimulator(int width, int height) : BaseSimulator(width, height) {
-    simulator_type = SimType::QT;
+QTSimulatorBase::QTSimulatorBase(int width, int height)
+    : BaseSimulator(width, height) {
 
-    phash_head.resize(nx * ny, -1);
-    phash_next.clear();
     leaf_table[0].resize(nx * ny, -1);
     leaf_table[1].resize(nx * ny, -1);
     G     = 150.f;
@@ -27,25 +25,15 @@ QTSimulator::QTSimulator(int width, int height) : BaseSimulator(width, height) {
     // solver.setMaxIterations(80);
     solver.setTolerance(1e-3);
     // Eigen::setNbThreads(6);
-
-    root_list = 0;
-    allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
-    initQuadtree(3, root_list);
 }
-void QTSimulator::reset() {
-    phash_head.assign(nx * ny, -1);
-    phash_next.clear();
+void QTSimulatorBase::reset() {
     node_pool[0].clear();
     node_pool[1].clear();
     leaf_table[0].resize(nx * ny, -1);
     leaf_table[1].resize(nx * ny, -1);
-
-    root_list = 0;
-    allocate((float)nx / 2, (float)ny / 2, (float)nx, 0, root_list);
-    initQuadtree(3, root_list);
 }
 
-void QTSimulator::initQuadtree(int max_depth, int list_idx, int node_idx) {
+void QTSimulatorBase::initQuadtree(int max_depth, int list_idx, int node_idx) {
     if (node_pool[list_idx][node_idx].depth >= max_depth)
         return;
 
@@ -57,25 +45,25 @@ void QTSimulator::initQuadtree(int max_depth, int list_idx, int node_idx) {
     }
 }
 
-void QTSimulator::addWater(float x, float y, float radius) {
+void QTSimulatorBase::addWater(float x, float y, float radius) {
     add_water    = true;
     water_x      = x;
     water_y      = y;
     water_radius = radius;
 }
-void QTSimulator::delWater(float x, float y, float radius) {
+void QTSimulatorBase::delWater(float x, float y, float radius) {
     del_water    = true;
     water_x      = x;
     water_y      = y;
     water_radius = radius;
 }
 
-std::vector<Line> QTSimulator::getLines() const {
+std::vector<Line> QTSimulatorBase::getLines() const {
     std::vector<Line> lines;
     recursiveGetLines(lines, root_list);
     return lines;
 }
-void QTSimulator::recursiveGetLines(
+void QTSimulatorBase::recursiveGetLines(
     std::vector<Line> &lines, int list_idx, int node_idx
 ) const {
     auto &node = getNode(list_idx, node_idx);
@@ -96,7 +84,7 @@ void QTSimulator::recursiveGetLines(
         recursiveGetLines(lines, list_idx, node.children_idx[i]);
 }
 
-void QTSimulator::update(float dt) {
+void QTSimulatorBase::buildNewTree(float dt) {
     computeSizingFunction(dt);
     propagateSizingFunction();
 
@@ -118,26 +106,9 @@ void QTSimulator::update(float dt) {
     root_list = new_root_list;
     QTu       = QTu_new;
     QTv       = QTv_new;
-
-    // Start solve new frame data
-    // 1. apply gravity on new tree
-    applyGravity(dt);
-    applySurfaceTension(dt);
-    // 2. solve the pressure
-    setBoundaries();
-    project();
-    setBoundaries();
-    // 3. extrapolate velocity
-    velExtrapolation();
-    // 4. rebuild level set(phi)
-    redistancing();
-
-    // Reset interact state
-    add_water = false;
-    del_water = false;
 }
 
-void QTSimulator::computeSizingFunction(float dt) {
+void QTSimulatorBase::computeSizingFunction(float dt) {
     /*
      * For all leaves.
      * Compute the size function value
@@ -206,7 +177,7 @@ void QTSimulator::computeSizingFunction(float dt) {
     }
 }
 
-void QTSimulator::propagateSizingFunction() {
+void QTSimulatorBase::propagateSizingFunction() {
     /*
      * For all leaves.
      * propagate the size function value to around nodes
@@ -243,7 +214,7 @@ void QTSimulator::propagateSizingFunction() {
     }
 }
 
-void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
+void QTSimulatorBase::recursiveBuildTree(float dt, int node_idx) {
     /*
      * Build new quadtree -> new tree list id = 1 - root_list
      */
@@ -284,7 +255,7 @@ void QTSimulator::recursiveBuildTree(float dt, int node_idx) {
     }
 }
 
-void QTSimulator::smoothing() {
+void QTSimulatorBase::smoothing() {
     /*
      * Smooth new tree.
      * Keep |a.depth - b.depth| <= 1, where a,b are adjacent leaves.
@@ -351,7 +322,7 @@ void QTSimulator::smoothing() {
     }
 }
 
-void QTSimulator::cacheLeaves() {
+void QTSimulatorBase::cacheLeaves() {
     /*
      * Build cache leaves for new tree.
      * Only for new tree -> 1 - root_list
@@ -385,7 +356,7 @@ void QTSimulator::cacheLeaves() {
     }
 }
 
-void QTSimulator::cacheNeighbors() {
+void QTSimulatorBase::cacheNeighbors() {
     /*
      * Build cache neighbors for nodes in new tree.
      * Only for new tree -> 1 - root_list
@@ -406,7 +377,7 @@ void QTSimulator::cacheNeighbors() {
     }
 }
 
-void QTSimulator::findAllEdges() {
+void QTSimulatorBase::findAllEdges() {
     /*
      * Collect all edges in new tree nodes.
      * Only for new tree -> 1 - root_list
@@ -619,7 +590,7 @@ void QTSimulator::findAllEdges() {
     }
 }
 
-void QTSimulator::advectQuadtreeDatas(float dt) {
+void QTSimulatorBase::advectQuadtreeDatas(float dt) {
     /*
      * Advect old datas to new tree.
      * Only for new tree -> 1 - root_list
@@ -661,7 +632,7 @@ void QTSimulator::advectQuadtreeDatas(float dt) {
     }
 }
 
-void QTSimulator::applyGravity(float dt) {
+void QTSimulatorBase::applyGravity(float dt) {
     /*
      * For all edges.
      * add gravity on horizontial edges
@@ -678,42 +649,11 @@ void QTSimulator::applyGravity(float dt) {
     }
 }
 
-void QTSimulator::applySurfaceTension(float dt) {
+void QTSimulatorBase::applySurfaceTension(float dt) {
     if (Sigma <= 0.0f)
         return;
 
-    // 1. 計算所有葉子節點的曲率 (只針對靠近交界面的節點進行計算以節省效能)
-    std::vector<float> leaf_H(node_pool[root_list].size(), 0.0f);
-
-#pragma omp parallel for
-    for (int i = 0; i < cached_leaves_idx.size(); ++i) {
-        int leaf_idx = cached_leaves_idx[i];
-        auto &leaf   = getNode(root_list, leaf_idx);
-
-        // 只計算靠近表面 (2 倍網格大小內) 的單元曲率
-        if (std::abs(leaf.phi) < leaf.size * 2.0f) {
-            leaf_H[leaf_idx] = computeCurvature(leaf.x, leaf.y, leaf.size);
-        }
-    }
-
-    // 重用與 project() 相同的 W_k 計算邏輯
-    auto compute_Wk = [&](QuadtreeEdge &face) {
-        float total = 0, liquid = 0;
-        for (size_t i = 0; i < face.adj_cells_idx.size(); i++) {
-            auto &cell = getNode(root_list, face.adj_cells_idx[i]);
-            total += face.grad_coeff[i] * cell.phi;
-            if (cell.phi <= 0.f)
-                liquid += face.grad_coeff[i] * cell.phi;
-        }
-        if (std::abs(liquid) < 1e-6f)
-            return 1.f;
-        return total / liquid;
-    };
-
-    // 2. 更新水平面速度 (QTu)
-#pragma omp parallel for
-    for (size_t k = 0; k < QTu.size(); ++k) {
-        auto &face      = QTu[k];
+    auto update_face = [&](QuadtreeEdge &face) {
         bool has_liquid = false;
         bool has_gas    = false;
         for (int cell_idx : face.adj_cells_idx) {
@@ -723,94 +663,133 @@ void QTSimulator::applySurfaceTension(float dt) {
                 has_gas = true;
             }
         }
-        if (!has_liquid || !has_gas) {
-            continue; // 若不跨越交界面（全為液體或全為空氣），則跳過
+        if (!has_liquid || !has_gas)
+            return; // 若不跨越交界面（全為液體或全為空氣），則跳過
+
+        // 統一宣告兩端的代表性數據
+        float phi_side1, x_side1, y_side1;
+        float phi_side2, x_side2, y_side2;
+
+        if (face.adj_cells_idx.size() == 2) {
+            // 1. 普通網格面 (Size == 2)
+            int c1_idx  = face.adj_cells_idx[0];
+            int c2_idx  = face.adj_cells_idx[1];
+            auto &cell1 = getNode(root_list, c1_idx);
+            auto &cell2 = getNode(root_list, c2_idx);
+
+            phi_side1 = cell1.phi;
+            x_side1   = cell1.x;
+            y_side1   = cell1.y;
+            phi_side2 = cell2.phi;
+            x_side2   = cell2.x;
+            y_side2   = cell2.y;
+        } else {
+            // 2. T-junction 面 (Size > 2)
+            // 找出尺寸最大的那個網格（大網格端）
+            int large_idx  = -1;
+            float max_size = 0.0f;
+            for (int idx : face.adj_cells_idx) {
+                float sz = getNode(root_list, idx).size;
+                if (sz > max_size) {
+                    max_size  = sz;
+                    large_idx = idx;
+                }
+            }
+
+            auto &cell_large = getNode(root_list, large_idx);
+            phi_side1        = cell_large.phi;
+            x_side1          = cell_large.x;
+            y_side1          = cell_large.y;
+
+            // 將所有其餘的小網格進行幾何與 level-set 平均（代表小網格端）
+            float phi_sum   = 0.0f;
+            float x_sum     = 0.0f;
+            float y_sum     = 0.0f;
+            int small_count = 0;
+            for (int idx : face.adj_cells_idx) {
+                if (idx == large_idx)
+                    continue;
+                auto &cell_small = getNode(root_list, idx);
+                phi_sum += cell_small.phi;
+                x_sum += cell_small.x;
+                y_sum += cell_small.y;
+                small_count++;
+            }
+            phi_side2 = phi_sum / small_count;
+            x_side2   = x_sum / small_count;
+            y_side2   = y_sum / small_count;
         }
 
-        float W_prime = std::max(compute_Wk(face), 0.01f);
+        // 計算精確交點 (phi = 0 的位置)
+        float theta = -phi_side1 / (phi_side2 - phi_side1);
+        theta       = std::clamp(theta, 0.0f, 1.0f); // 確保在數值邊界內安全
+
+        float x_surf = (1.0f - theta) * x_side1 + theta * x_side2;
+        float y_surf = (1.0f - theta) * y_side1 + theta * y_side2;
+
+        float H_face = computeCurvature(x_surf, y_surf, face.length);
+
+        float W_prime = std::max(computeWk(face), 0.01f);
         float grad_H  = 0.0f;
 
         // 累加鄰近單元的曲率梯度 (依據 Ghost Fluid 邏輯，僅考慮液體單元)
+        // 這裡會自動處理 T-junction 的所有相鄰小單元，與論文的矩陣轉置完全一致
         for (size_t i = 0; i < face.adj_cells_idx.size(); ++i) {
             int cell_idx = face.adj_cells_idx[i];
             auto &cell   = getNode(root_list, cell_idx);
             if (cell.phi <= 0.0f) {
-                grad_H += face.grad_coeff[i] * Sigma * leaf_H[cell_idx];
+                grad_H += face.grad_coeff[i] * Sigma * H_face;
             }
         }
         // 將表面張力加速度融入中間速度
         face.val += dt * W_prime * grad_H;
-    }
+    };
 
-    // 3. 更新垂直面速度 (QTv)
-#pragma omp parallel for
-    for (size_t k = 0; k < QTv.size(); ++k) {
-        auto &face      = QTv[k];
-        bool has_liquid = false;
-        bool has_gas    = false;
-        for (int cell_idx : face.adj_cells_idx) {
-            if (getNode(root_list, cell_idx).phi <= 0.0f) {
-                has_liquid = true;
-            } else {
-                has_gas = true;
-            }
-        }
-        if (!has_liquid || !has_gas) {
-            continue; // 若不跨越交界面（全為液體或全為空氣），則跳過
+#pragma omp parallel
+    {
+#pragma omp for
+        for (size_t k = 0; k < QTu.size(); ++k) {
+            auto &face = QTu[k];
+            update_face(face);
         }
 
-        float W_prime = std::max(compute_Wk(face), 0.01f);
-        float grad_H  = 0.0f;
-        for (size_t i = 0; i < face.adj_cells_idx.size(); ++i) {
-            int cell_idx = face.adj_cells_idx[i];
-            auto &cell   = getNode(root_list, cell_idx);
-            if (cell.phi <= 0.0f) {
-                grad_H += face.grad_coeff[i] * Sigma * leaf_H[cell_idx];
-            }
+#pragma omp for
+        for (size_t k = 0; k < QTv.size(); ++k) {
+            auto &face = QTv[k];
+            update_face(face);
         }
-        face.val += dt * W_prime * grad_H;
     }
 }
 
-void QTSimulator::setBoundaries() {
+void QTSimulatorBase::setBoundaries() {
 /*
  * For all edges.
  * Set the boundary to 0
  */
 #pragma omp parallel for
     for (int i = 0; i < QTu.size(); i++) {
-        if (QTu[i].solid_fraction >= 1.f)
-            QTu[i].val = 0.0f;
+        if (QTu[i].solid_fraction >= 1.f) {
+            QTu[i].val     = 0.0f;
+            QTu[i].val_old = 0.0f;
+        }
     }
 
 #pragma omp parallel for
     for (int i = 0; i < QTv.size(); i++) {
-        if (QTv[i].solid_fraction >= 1.f)
-            QTv[i].val = 0.0f;
+        if (QTv[i].solid_fraction >= 1.f) {
+            QTv[i].val     = 0.0f;
+            QTv[i].val_old = 0.0f;
+        }
     }
 }
 
-void QTSimulator::project() {
+void QTSimulatorBase::project() {
     /*
      * For all edges.
      * compute pressure and update velocity
      */
 
-    auto compute_Wk = [&](QuadtreeEdge &face) {
-        float total = 0, liquid = 0;
-        for (int i = 0; i < face.adj_cells_idx.size(); i++) {
-            auto &cell = getNode(root_list, face.adj_cells_idx[i]);
-            total += face.grad_coeff[i] * cell.phi;
-            if (cell.phi <= 0.f)
-                liquid += face.grad_coeff[i] * cell.phi;
-        }
-        if (std::abs(liquid) < 1e-6f)
-            return 1.f;
-        return total / liquid;
-    };
-
     int N = cached_leaves_idx.size();
-    static std::vector<int> leaf_fluid_id_offset(N, 0);
     if (leaf_fluid_id_offset.size() < N)
         leaf_fluid_id_offset.resize(N, 0);
 
@@ -846,9 +825,8 @@ void QTSimulator::project() {
     QTtriplets.clear();
 
     int max_threads = omp_get_max_threads();
-    static std::vector<std::vector<Eigen::Triplet<float>>> thread_triplets(
-        max_threads
-    );
+    if (thread_triplets.size() < N)
+        thread_triplets.resize(N);
 
     auto addFace = [&](QuadtreeEdge &face,
                        std::vector<Eigen::Triplet<float>> &local_trip) {
@@ -862,7 +840,7 @@ void QTSimulator::project() {
         if (!has_fluid)
             return;
 
-        float W_k         = compute_Wk(face);
+        float W_k         = computeWk(face);
         float W_prime     = std::max(W_k, 0.01f);
         float face_weight = VA * W_prime;
 
@@ -929,7 +907,7 @@ void QTSimulator::project() {
             grad_p += face.grad_coeff[i] * p_val;
         }
 
-        float W_prime = std::max(compute_Wk(face), 0.01f);
+        float W_prime = std::max(computeWk(face), 0.01f);
         face.val -= W_prime * grad_p;
     };
 
@@ -944,7 +922,7 @@ void QTSimulator::project() {
     }
 }
 
-void QTSimulator::velExtrapolation() {
+void QTSimulatorBase::velExtrapolation() {
 
     const int ITER = 3;
 
@@ -1001,7 +979,7 @@ void QTSimulator::velExtrapolation() {
     }
 }
 
-void QTSimulator::redistancing() {
+void QTSimulatorBase::redistancing() {
     /*
      * For all leaves.
      * recompute the phi by particles
@@ -1035,7 +1013,6 @@ void QTSimulator::redistancing() {
     }
 
     int N = cached_leaves_idx.size();
-    static std::vector<int> leaf_offset(N, 0);
     if (leaf_offset.size() < cached_leaves_idx.size())
         leaf_offset.resize(cached_leaves_idx.size(), 0);
 
@@ -1084,7 +1061,9 @@ void QTSimulator::redistancing() {
     FMMSolver(init_elements);
 }
 
-void QTSimulator::FMMSolver(std::vector<std::pair<float, int>> &init_datas) {
+void QTSimulatorBase::FMMSolver(
+    std::vector<std::pair<float, int>> &init_datas
+) {
     auto get_axis = [](const QuadtreeNode &a, const QuadtreeNode &b) {
         float dx = std::abs(a.x - b.x);
         float dy = std::abs(a.y - b.y);
@@ -1208,7 +1187,7 @@ void QTSimulator::FMMSolver(std::vector<std::pair<float, int>> &init_datas) {
 }
 
 // Util Functions
-void QTSimulator::subdivideNode(int list_idx, int node_idx) {
+void QTSimulatorBase::subdivideNode(int list_idx, int node_idx) {
 
     auto &pool = node_pool[list_idx];
     pool.reserve(pool.size() + 4);
@@ -1231,10 +1210,9 @@ void QTSimulator::subdivideNode(int list_idx, int node_idx) {
     }
 }
 
-void QTSimulator::collectLeafNodes(
+void QTSimulatorBase::collectLeafNodes(
     std::vector<int> &leaves_idx, int list_idx
-) const {
-    static std::vector<int> node_offset(node_pool[list_idx].size(), 0);
+) {
     if (node_offset.size() < node_pool[list_idx].size())
         node_offset.resize(node_pool[list_idx].size(), 0);
 
@@ -1267,7 +1245,7 @@ void QTSimulator::collectLeafNodes(
     }
 }
 
-void QTSimulator::getNeighbors(
+void QTSimulatorBase::getNeighbors(
     std::vector<std::pair<int, int>> &neighbors, int list_idx, int node_idx
 ) {
     // 0: left
@@ -1319,7 +1297,7 @@ void QTSimulator::getNeighbors(
     );
 }
 
-int QTSimulator::getNodeIdxAt(
+int QTSimulatorBase::getNodeIdxAt(
     float x, float y, int list_idx, int node_idx
 ) const {
 
@@ -1344,7 +1322,7 @@ int QTSimulator::getNodeIdxAt(
     return getNodeIdxAt(x, y, list_idx, node.children_idx[child_idx]);
 }
 
-void QTSimulator::getNodesIdxIn(
+void QTSimulatorBase::getNodesIdxIn(
     float x, float y, float radius_ratio, std::vector<int> &nodes_idx
 ) {
     nodes_idx.clear();
@@ -1389,7 +1367,7 @@ void QTSimulator::getNodesIdxIn(
         visited[idx] = false;
 }
 
-NeighborDatas QTSimulator::getNeighborDatas(int node_idx) {
+NeighborDatas QTSimulatorBase::getNeighborDatas(int node_idx) {
 
     NeighborDatas result;
     auto &node      = getNode(root_list, node_idx);
@@ -1422,7 +1400,7 @@ NeighborDatas QTSimulator::getNeighborDatas(int node_idx) {
     return result;
 }
 
-float QTSimulator::computeCurvature(float x, float y, float size) {
+float QTSimulatorBase::computeCurvature(float x, float y, float size) {
     // 差分步長，與網格大小成比例
     float d = size * 0.5f;
 
@@ -1448,7 +1426,7 @@ float QTSimulator::computeCurvature(float x, float y, float size) {
     float dxy = (phi_RT - phi_LT - phi_RB + phi_LB) / (4.f * d * d);
 
     float denom = std::sqrt(dx * dx + dy * dy);
-    if (denom < 1e-5f)
+    if (denom < 1e-2f)
         return 0.0f;
 
     // 2D 曲率公式
@@ -1460,7 +1438,7 @@ float QTSimulator::computeCurvature(float x, float y, float size) {
 }
 
 InterpolatedData
-QTSimulator::advect(float x, float y, float dt, uint32_t opts) {
+QTSimulatorBase::advect(float x, float y, float dt, uint32_t opts) {
     auto current_data = MLSinterpolate(x, y, OPT_VEL_ALL);
     float u_val       = current_data.u;
     float v_val       = current_data.v;
@@ -1471,8 +1449,25 @@ QTSimulator::advect(float x, float y, float dt, uint32_t opts) {
     return MLSinterpolate(past_x, past_y, opts);
 }
 
+float QTSimulatorBase::computeWk(QuadtreeEdge &face) {
+    float total = 0, liquid = 0;
+    for (size_t i = 0; i < face.adj_cells_idx.size(); i++) {
+        auto &cell = getNode(root_list, face.adj_cells_idx[i]);
+        total += face.grad_coeff[i] * cell.phi;
+        if (cell.phi <= 0.f)
+            liquid += face.grad_coeff[i] * cell.phi;
+    }
+    if (std::abs(liquid) < 1e-6f)
+        return 1.f;
+
+    float wk = total / liquid;
+    return std::clamp(wk, -10.0f, 10.0f);
+    // return total / liquid;
+}
+
 // ######################### MLS #########################
-InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
+InterpolatedData
+QTSimulatorBase::MLSinterpolate(float x, float y, uint32_t opts) {
     InterpolatedData result = {0.0f, 1000.f, 0.0f, 0.0f, 0.0f};
 
     if (opts == OPT_NONE)
@@ -1584,7 +1579,7 @@ InterpolatedData QTSimulator::MLSinterpolate(float x, float y, uint32_t opts) {
 }
 
 // 2D 變數的 MLS 求解輔助函式
-std::pair<float, float> QTSimulator::solveMLS(
+std::pair<float, float> QTSimulatorBase::solveMLS(
     float x, float y, const std::vector<MLSSamplePoint> &samples
 ) {
     if (samples.empty())
@@ -1623,7 +1618,7 @@ std::pair<float, float> QTSimulator::solveMLS(
     }; // 局部座標系下，常數項即為 (0,0) 擬合值，對應索引 2
 }
 
-void QTSimulator::MLSMirrorNode(
+void QTSimulatorBase::MLSMirrorNode(
     std::vector<MLSSamplePoint> &sample_points, int node_idx
 ) {
 
@@ -1675,7 +1670,7 @@ void QTSimulator::MLSMirrorNode(
         sample_points.push_back({mx, my, n.size, n.S, save_phi});
 }
 
-void QTSimulator::MLSMirrorEdge(
+void QTSimulatorBase::MLSMirrorEdge(
     std::vector<MLSSamplePoint> &sample_points,
     std::vector<uint64_t> &visited_faces,
     uint64_t visit_epoch,

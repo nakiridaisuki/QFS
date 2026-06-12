@@ -116,32 +116,33 @@ class SimulatorUI {
             sim->setSigma(tension);
 
             GuiComboBox(
-                Rectangle{20, curr_y, 120, 20},
-                resolution_data.c_str(),
-                &new_sim_size
+                Rectangle{20, curr_y, 220, 20},
+                "MAC Eulerian;MAC FLIP;QT Eulerian;QT EXNBFLIP",
+                &new_sim_type
             );
             updateY(curr_y, 20);
 
             GuiComboBox(
-                Rectangle{20, curr_y, 120, 20},
-                "MAC Eulerian; MAC FLIP;Quadtree",
-                &new_sim_type
+                Rectangle{20, curr_y, 110, 20},
+                resolution_data.c_str(),
+                &new_sim_size
             );
             need_reset =
-                GuiButton(Rectangle{150, curr_y, 100, 20}, "Reset Fluid");
+                GuiButton(Rectangle{140, curr_y, 100, 20}, "Reset Fluid");
+            updateY(curr_y, 20);
+
+            if (GuiButton(Rectangle{20, curr_y, 220, 20}, "Start recording")) {
+                GetCurrentTimestamp();
+                recorder.StartRecording(strcat(time_buf, ".mp4"));
+            }
+            updateY(curr_y, 20);
+            if (GuiButton(Rectangle{20, curr_y, 220, 20}, "Stop recording")) {
+                recorder.StopRecording();
+            }
             updateY(curr_y, 20);
 
             if (showDebug)
                 curr_y = drawPackedCheckBoxes(20, curr_y, debug_checkbox);
-
-            if (GuiButton(Rectangle{20, curr_y, 100, 20}, "Start recording")) {
-                GetCurrentTimestamp();
-                recorder.StartRecording(strcat(time_buf, ".mp4"));
-            }
-            if (GuiButton(Rectangle{130, curr_y, 100, 20}, "Stop recording")) {
-                recorder.StopRecording();
-            }
-            updateY(curr_y, 20);
         }
     }
 

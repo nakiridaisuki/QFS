@@ -25,10 +25,13 @@ class MACFLIP : public MACSimulatorBase {
     void addWater(float x, float y, float radius) override; // add water and dye
     void delWater(float x, float y, float radius) override; // add water and dye
 
-    const std::vector<Particle> &getParticles() const override {
-        return particles;
+    const std::vector<Particle> *getParticles() const override {
+        return &particles;
     }
 
     // set functions
-    void reset() override { particles.clear(); }
+    void reset() override {
+        MACSimulatorBase::reset();
+        particles.clear();
+    }
 };

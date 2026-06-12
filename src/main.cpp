@@ -2,10 +2,10 @@
 #include "GUI.h"
 #include "MAC/Eulerian.h"
 #include "MAC/FLIP.h"
-#include "QT.h"
+#include "QT/EXNBFLIP.h"
+#include "QT/Eulerian.h"
 #include "Recorder.h"
 #include "Renderer.h"
-#include <algorithm>
 #include <vector>
 
 #define RAYGUI_IMPLEMENTATION
@@ -27,7 +27,7 @@ int main() {
     SetTargetFPS(FPS);
 
     // BaseSimulator *sim = new MACEulerian(simWidth, simHeight);
-    BaseSimulator *sim = new QTSimulator(simWidth, simHeight);
+    BaseSimulator *sim = new QTEulerian(simWidth, simHeight);
     FluidRenderer renderer(sim, screenWidth, screenHeight);
     Recorder recorder(FPS);
     SimulatorUI gui(sim, renderer, recorder, resolutions);
@@ -71,8 +71,7 @@ int main() {
                 sim->delWater(gridX, gridY, brushRadius);
             }
 
-            float frameTime = std::min(GetFrameTime(), 0.01667f);
-            sim->update(frameTime);
+            sim->update(1.f / FPS);
         }
 
         if (recorder.isRecording())
@@ -106,8 +105,10 @@ int main() {
                     sim = new MACEulerian(simWidth, simHeight);
                 else if (new_type == SimType::MAC_FLIP)
                     sim = new MACFLIP(simWidth, simHeight);
+                else if (new_type == SimType::QT_Eulerian)
+                    sim = new QTEulerian(simWidth, simHeight);
                 else
-                    sim = new QTSimulator(simWidth, simHeight);
+                    sim = new QTEXNBFLIP(simWidth, simHeight);
 
                 renderer.setSimulator(sim);
                 gui.setSimulator(sim);

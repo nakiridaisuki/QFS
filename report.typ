@@ -334,3 +334,271 @@ If there are less then 4 particles in a under water cell,
 then we random sample needed particles number and bilinear interpolate velocity to it.
 
 == Quadtree Grid
+
+The QT simulator rebuilds the entire quadtree from scratch each frame.
+The simulation pipeline is:
+1. Build a new quadtree refined around the surface and high-velocity regions.
+2. Apply gravity and surface tension on the new edges.
+3. Solve the pressure Poisson equation (projection).
+4. Extrapolate velocity from fluid cells to nearby air cells (same as MAC, on adaptive edges).
+5. Reconstruct $Phi$ via redistancing.
+
+Steps 2, 4, and 5 follow the same principles as in MAC but operate on the adaptive edge and leaf structures.
+The key implementation differences lie in step 1 (tree construction) and step 3 (pressure discretization).
+
+=== Building a New Tree Each Frame
+
+The tree reconstruction consists of eight sub-steps, starting from the existing tree
+and producing a fully refined new tree with all data advected.
+
+==== 1. Computing the Size Function
+
+We compute $S$ for each leaf using the formula from section 1.2. The Laplacian of $Phi$ uses
+non-uniform finite differences to account for varying neighbor cell sizes ($L_"dis"$, $R_"dis"$, etc.
+are the distances to each neighbor). The velocity gradients
+$(partial u) / (partial x)$ and $(partial v) / (partial y)$ are estimated from the leaf's adjacent u and v edges.
+```c
+// For each leaf. L/R/U/D_dis and L/R/U/D_phi is neighbor's data
+d2f_dx2 = 2 * (L_phi / (L_dis * (L_dis + R_dis))
+            - leaf.phi / (L_dis * R_dis)
+            + R_phi / (R_dis * (L_dis + R_dis)))
+d2f_dy2 = ... // computed similarly with D/U
+
+S_geo = gamma_phi * |d2f_dx2 + d2f_dy2|
+S_vel = gamma_u * sqrt((leaf.ul - leaf.ur)^2 + (leaf.vl - leaf.vr)^2)
+        / leaf.size
+
+S_new = S_geo + S_vel
+S_advected = MLS interpolated S from old tree
+
+S = max(R_t * S_advected, S_new)  // R_t = 0.9^(dt / 0.01)
+```
+
+==== 2. Propagating the Size Function
+
+To avoid abrupt refinement changes, we smooth $S$ over 5 iterations via area-weighted
+averaging with neighbors:
+```c
+for iter in 1..5:
+  for each leaf:
+    total = leaf.S * leaf.area
+    total_area = leaf.area
+    for each cached neighbor:
+        total += max(neighbor.S, leaf.S) * neighbor.area
+        total_area += neighbor.area
+    leaf.S = total / total_area
+```
+
+==== 3. Recursive Tree Subdivision
+
+We allocate a new root and recursively subdivide using the two criteria from section 1.2
+($|Phi| < "size"$ and $S > 1 / "size"$). The minimum cell size is capped at `1.5`.
+$Phi$ and $S$ at child nodes are obtained via MLS interpolation from the old tree.
+User water add/delete interactions merge a circle SDF into $Phi$ during this traversal.
+```c
+recursiveBuildTree(node):
+    if node is smallest: return
+
+    exp_phi = advect(node.x, node.y)    // semi-Lagrangian from old tree
+    exp_S   = MLSinterpolate(node.x, node.y)
+    if user_interaction: exp_phi = merge(circleSDF, exp_phi)
+    if |exp_phi| < node.size and exp_S > 1/node.size:
+        subdivide(node)  // allocate 4 children, inherit parent edge ids
+        for child in children: recursiveBuildTree(child)
+```
+
+==== 4. Smoothing (Balancing) the Tree
+
+A min-heap of node size to check if adjacent leaves satisfy $|"depth"_a - "depth"_b| <= 1$.
+When a leaf detects a neighbor more than one level coarser,
+that neighbor is subdivided. This bounds T-junctions to at most two small cells meeting
+one large cell, keeping the pressure stencil tractable.
+
+==== 5--6. Caching Leaves and Neighbors
+
+Leaves are collected into a flat array via the parallel prefix-sum pattern (section 2.4).
+A `leaf_table` maps any integer grid coordinate to its containing leaf in $O(1)$. For each leaf,
+eight probe points (two per direction) query the table to build `cached_neighbors_idx` and
+per-direction `neighbor_cnt[4]`. This precomputation amortizes neighbor lookups used throughout
+the pipeline.
+
+==== 7. Finding All Edges
+
+This step translates the cell-centered tree into staggered (MAC-style) velocity edges.
+For each leaf, we iterate over its four faces (left, up, right, down) and decide whether
+to create a new edge or reuse an existing one from a neighbor.
+
+First, we adopt a **face ownership rule**: when two equal-depth cells share a face,
+only the right/bottom cell creates the edge; the left/top cell will reuse that edge.
+This avoids creating duplicate edges at regular interfaces.
+
+From large to small, for each leaf face, we examine the cached `neighbor_cnt[dir]`:
+- **No neighbor**: The face is on the domain boundary. Create an edge with
+  `solid_fraction = 1`, the leaf itself as the sole adjacent cell, and gradient
+  coefficient ${0}$ (the face carries zero velocity regardless of pressure).
+- **Two smaller neighbors (T-junction)**: The face spans this leaf on one side and
+  two smaller leaves on the other. Create an edge with three adjacent cells---this
+  leaf plus the two smaller neighbors---using the T-junction gradient stencil
+  $"sign" dot [-1, 1/2, 1/2] / (1.5 Delta x)$ from section 1.3. The smaller
+  leaves' coefficients are both $0.5$, and the larger leaf's coefficient is $-1$
+  (or $+1$, flips by face direction).
+- **One neighbor**:
+  - If the neighbor has the same depth and we are on the right or bottom face
+    (`dir > 1`): create a regular edge with two adjacent cells and the
+    $[-1, 1] / Delta x$ stencil from section 1.3 (negated for left/top).
+  - If the neighbor has the same depth and we are on the left or top face
+    (`dir <= 1`): this is an overlay case---the neighbor is the right/bottom
+    cell that already owns this face. Reuse its existing edge id.
+  - If the neighbor is larger (coarser): overlay case---our face maps to the
+    larger neighbor's corresponding edge. Reuse that edge id.
+
+In the code, we first count how many edges each leaf will create, then allocate
+the u and v edge arrays and fill them. The overlay resolution is done in a
+separate pass after all edges are created.
+
+==== 8. Advecting Data to the New Tree
+
+Cell-centered data ($Phi$, $S$) and edge velocities are advected via semi-Lagrangian
+backward trace + MLS interpolation from the old tree. Newly created edges skip this step
+and retain their initial zero velocity.
+
+=== Pressure Solve on the Adaptive Grid
+
+Recall the discrete system from section 1.3: $nabla^T [V A] [F nabla] p = nabla^T [V A] u^*$,
+where $V = 3 Delta x^2$, $A = 1 - "solid_fraction"$, and $F = max(W_k, 0.01)$.
+
+We first compute a `fluid_id` mapping (via prefix sum) to index only the $Phi < 0$ cells
+into the linear system. Then we iterate over all u and v edges:
+```c
+for each face in QTu, QTv:
+  W_k = computeWk(face)  // use the formula
+  W_prime = max(W_k, 0.01)
+  face_weight = 3 * face.length^2 * (1 - solid_frac) * W_prime  // VA * F
+
+  for each adjacent fluid cell_i:
+    div[fluid_id[i]] += VA * face.val * grad_coeff[i] // RHS (VA * u^*)
+    for each adjacent fluid cell_j:
+      a = face_weight * grad_coeff[i] * grad_coeff[j]
+      Add a into correspond position in Laplacian matrix
+```
+
+Each OpenMP thread accumulates triplets locally; after the face loop, thread-local vectors
+are merged. The resulting SPD matrix is solved via Eigen's PCG with tolerance $10^(-3)$.
+After solving, velocity is updated:
+```c
+for each face:
+  grad_p = sum of (grad_coeff * pressure) for each adjacent fluid cell
+  face.val -= W_prime * grad_p
+```
+
+=== Level Set Maintenance
+
+The redistancing follows the two-stage approach from section 1.1, but adapted to the
+non-uniform quadtree.
+
+==== Stage 1: Surface Cell Detection
+
+As described in section 1.1 step a, we check cached neighbors for opposite-sign $Phi$.
+The distance to interface is estimated by linear interpolation (the formula from section 1.1),
+scaled by the average of the two cell sizes $(L_i + L_j) / 2$ to account for non-uniform resolution:
+$
+  Phi_"i_new" = (|Phi_i|) / (|Phi_i| + |Phi_j|) dot (L_i + L_j) / 2
+$
+Known surface cells are collected into a contiguous array via parallel prefix sum,
+with each known cell's signed $Phi$ serving as the initial boundary condition for FMM.
+
+==== Stage 2: Fast Marching Method
+
+This implements step b from section 1.1. A min-heap initialized with known surface cells
+propagates $Phi$ outward. The per-neighbor Eikonal solve differs from the uniform case:
+each axis may have a different effective grid spacing $h$ (average of the two cell sizes).
+```c
+// For each unvisited neighbor, collect the best known |phi| per axis:
+for each known neighbor n_i of target cell:
+  axis = (|dx| > |dy|) ? X_AXIS : Y_AXIS
+  if |n_i.phi| < axis_data[axis].u:
+    axis_data[axis] = {|n_i.phi|, 0.5*(target.size + n_i.size)}
+
+// Sort valid axes by u ascending, then solve:
+u_1D = axes[0].u + axes[0].h
+if len(axes) >= 2 and u_1D > axes[1].u:
+  // 2D quadratic: A*u^2 + B*u + C = 0
+  // from (u - u1)^2 / h1^2 + (u - u2)^2 / h2^2 = 1
+  u_new = (-B + sqrt(disc)) / (2*A)
+else:
+  u_new = u_1D
+```
+After FMM completes, `phi_new` replaces `phi` for all leaves.
+
+=== EXNBFLIP
+
+The EXNBFLIP simulator extends the QT Eulerian with Lagrangian particles, reusing the
+FLIP-PIC blending and resampling logic from section 2.1.2. The key additions are:
+
+1. `particleToGrid()`: Particles scatter velocity to the finest edges (`size <= 1.5`)
+  via bilinear weighting within a 1.5-cell search radius. A spatial hash grid provides
+  $O(1)$ particle lookup per edge.
+2. `gridToParticle()`: Same FLIP-PIC blend as MAC FLIP, but velocity interpolation
+  uses MLS instead of bilinear.
+3. `advectParticles()`: RK2 midpoint method with MLS velocity queries.
+4. `resampleParticles()`: Deletes particles in deep interior ($Phi < -3 times "size"$),
+  seeds new ones in under-populated surface cells, checking $Phi < -0.1 times "size"$
+  before placement.
+
+However, EXNBFLIP is currently incomplete. The `reconstructSurface()` function---which
+should rebuild $Phi$ from particle positions after advection---has its core update logic
+commented out. Without this, the level set drifts from the particle distribution over time,
+and the simulation does not yet produce correct results.
+
+== Optimizations
+
+In both the uniform MAC and adaptive Quadtree simulators, several optimization strategies
+were employed to achieve real-time performance at moderate grid resolutions.
+
+=== Reducing Memory Allocation Overhead
+
+In MAC: All field arrays (`u`, `v`, `density`, `cell_type`, etc.) are pre-allocated once
+in the constructor and reused across frames via `std::fill`. The Eigen triplet list is
+pre-reserved with capacity `nx * ny * 5`. The per-thread triplet vectors used in the
+pressure assembly are declared `static` so they persist across frames.
+
+In QT: The tree nodes are stored in `node_pool[2]`---a double buffer where `root_list`
+toggles between 0 and 1 each frame. At the start of `buildNewTree`, the new tree's pool
+is `clear()`ed and reused, avoiding repeated deallocation. The `leaf_table` and various
+offset arrays (`leaf_fluid_id_offset`, `leaf_offset`, `node_offset`) are persistent and
+resized only when the leaf count grows. Thread-local variables (`visited` flags,
+`cell_points`, `u_samples`, `v_samples`, `visited_u_faces`, `visited_v_faces`) are
+declared with `thread_local` and grown on demand, preventing per-frame allocation
+in the hot MLS interpolation path. Edge mirroring uses an epoch-based visited-faces
+scheme ($O(1)$ clear via incrementing a `uint64_t` counter) to deduplicate samples
+without resetting arrays.
+
+=== OpenMP Parallelization
+
+Both simulators use `#pragma omp parallel for` extensively. Key parallelized regions:
+
+- **MAC**: Advection of u, v, and density run concurrently via `nowait`. Surface tension
+  Jacobi smoothing, normal computation, and curvature calculation are all parallelized.
+  The pressure matrix assembly uses thread-local triplets with `#pragma omp for`.
+  Velocity extrapolation iterates BFS layers in parallel for u and v edges.
+- **QT**: Sizing function computation, propagation iterations, leaf caching, neighbor
+  caching, edge finding (both passes), data advection to the new tree, gravity,
+  surface tension, pressure assembly, velocity extrapolation, and redistancing are all
+  parallelized. The pressure velocity update processes u and v edges concurrently
+  using `nowait`.
+
+=== Parallel Prefix Sum Optimization
+
+The Quadtree simulator frequently needs to build compact arrays from sparsely marked
+elements. A recurring pattern is:
+
+1. Mark valid elements with 1 in parallel.
+2. Compute a sequential prefix sum to determine output offsets.
+3. Scatter data in parallel using the precomputed offsets.
+
+This pattern is used in `collectLeafNodes()` (gathering all leaf indices), `findAllEdges()`
+(computing u/v edge counts and write offsets), `project()` (building the fluid cell ID
+mapping for the pressure system), and `redistancing()` (collecting known surface cells
+for FMM initialization). While the sequential prefix sum is $O(N)$ and not parallelized,
+the surrounding marking and scattering steps are fully parallel, yielding a significant
+speedup over atomic-push alternatives.

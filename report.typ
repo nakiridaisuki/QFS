@@ -1,15 +1,3 @@
-#set page(
-  paper: "a4",
-  numbering: "1",
-)
-#show title: set text(size: 24pt)
-#show title: set align(center)
-#show title: set block(below: 1em)
-#title[
-  CA2026 Final Project\
-  Adaptive Grid Fluid Simulator
-]
-
 #set text(
   font: ("Times New Roman", "New SimSun"),
   size: 12pt,
@@ -20,16 +8,10 @@
 #show heading.where(level: 2): set text(size: 16pt, weight: "bold")
 #show heading.where(level: 3): set text(size: 14pt, weight: "bold")
 #show heading.where(level: 4): set text(size: 12pt, weight: "bold")
-#show selector.or(
-  heading.where(level: 1),
-  heading.where(level: 2),
-  heading.where(level: 4),
-): set heading(numbering: (..nums) => {
+#set heading(numbering: (..nums) => {
   let n = nums.pos()
-  if n.len() <= 2 {
-    numbering("I.1.", ..n)
-  } else {
-    // numbering("i.", n.last())
+  if n.len() <= 3 {
+    numbering("I.1.a", ..n)
   }
 })
 #show raw.where(block: true): it => block(
@@ -39,35 +21,48 @@
   width: 100%,
   it,
 )
-
-
-#set align(center)
-
-Author: 113550058 蔡昀呈
-
 #set align(left)
 
+#set page(
+  paper: "a4",
+  margin: (x: 2.5cm, top: 3cm, bottom: 2.5cm),
+  header: align(right)[
+    #text(8pt, fill: luma(120))[CA2026 Final Project: Adaptive Grid Fluid Simulator]
+  ],
+  numbering: "1",
+)
 
-Outline
-- Introduction
-  - Motivation
-  - Fluid Simulation
-  - What does this paper done
-  - What did I do
+// 美化標題與作者區塊
+#align(center)[
+  #v(2cm)
+  #text(24pt, weight: "bold")[CA2026 Final Project] \
+  #v(0.5em)
+  #text(18pt, fill: rgb("1c3d5a"))[Adaptive Grid Fluid Simulator]
+  #v(2cm)
 
-- Implementation
-  - MAC / FLIP
-  - Quad Tree Simulator
-  - Optimizations
+  #grid(
+    columns: 1fr,
+    gutter: 1.2em,
+    text(12pt)[*Author:* 蔡昀呈 (113550058)],
+    text(11pt, fill: luma(100))[Department of Computer Science \ National Yang Ming Chiao Tung University]
+  )
+  #v(2cm)
+]
 
-- Conclude
+
+#outline(indent: 1.5em, depth: 2)
+#pagebreak()
 
 = Introduction
 
+This project implements the method described in
+Ryoichi Ando and Christopher Batty. 2020. "A Practical Octree Liquid Simulator with Adaptive Surface Resolution." ACM Transactions on Graphics (TOG).
+
 == Motivation
-A few month ago, I watched some captivating fluid simulator videos on Youtube (#link("https://youtu.be/rSKMYc1CQHE?si=LpY_0M06A26NAMnJ")[like this guy])
+A few months ago, I watched some captivating fluid simulator videos on Youtube (#link("https://youtu.be/rSKMYc1CQHE?si=LpY_0M06A26NAMnJ")[e.g., this channel])
 and some #link("https://youtu.be/Mh2y2Z6Iy0U?si=DDcJg1_ybWIZeHaR")[paper introduction] about fluid simulation.
 I found the simulations incredibly cool and want to build one myself some day. This project is the result of that aspiration.
+
 
 == Fluid Simulation
 To simulate fluid, we need to solve the Navier-Stokes equations:
@@ -98,22 +93,23 @@ $
 
 To solve the pressure on a discrete grid like a MAC grid, we can turn this Poisson equation into a system of linear equations. More implementation details will be provided in the following sections.
 
+#pagebreak()
 However, the traditional MAC method requires discretizing the entire simulation domain---including deep water regions---using a uniform grid.
 In 3D scenarios, this leads to a memory footprint that scales cubically as $O(N^3)$ with the grid resolution N,
 posing a severe bottleneck as the simulation scale expands or the resolution increases.
 
-In gaming or visual effects, we don't really need to simulate deep water regions in high detail;
+In computer graphics and real-time visual effects, high-resolution details are typically unnecessary in deep water regions;
 instead, we only focus on surface phenomena like splashes or waves.
 In this situation, using an adaptive grid near the surface can help us resolve this bottleneck.
 
-== What does this paper done
+== Overview of the Reference Method
 To simulate the fine details of surface phenomena, three key tasks must be addressed:
 1. Representing and tracking the free surface.
-2. Subdivide the grid dynamically around the surface.
+2. Subdividing the grid dynamically around the surface.
 3. Solving the pressure Poisson equation accurately on the adaptive grid.
 Below is an overview of the methodologies proposed to solve these challenges.
 
-=== 1. Tracking the Free Surface
+=== Tracking the Free Surface <sec-surface>
 To represent the liquid interface, the simulation utilizes a level-set method,
 storing a signed distance field (SDF) value, $Phi$, at each cell center.
 This value represents the minimum signed distance from the cell center to the surface,
@@ -129,7 +125,7 @@ Step b: Use this estimate as a boundary condition to solve Eikonal equation, $|n
 For step a, we can check adjacent cells that have opposite signs for $Phi$, indicating that the surface crosses them.
 To estimate new $Phi$, we can use linear interpolation:
 $
-  Phi_"i_new" = (- Phi_i) / (Phi_i - Phi_j)
+  Phi_"i_new" = (|Phi_i|) / (|Phi_i| + |Phi_j|)
 $
 and then mark the cells as updated.
 
@@ -138,11 +134,12 @@ the Fast Marching Method--which operates similarly to Dijkstra's algorithm--is
 used to propagate the values outward and solve the Eikonal equation for neighboring cells.
 This two-step approach reconstructs a clean, accurate SDF $Phi$ across the domain.
 
-=== 2. Subdivide Grid
-The framework use two main criteria to determine whether a grid cell should be subdivide: \
+#pagebreak()
+=== Grid Subdivide <sec-subdivide>
+The framework uses two main criteria to determine whether a grid cell should be subdivided: \
 a. $Phi$ < node size\
 b. Size function > 1 / node size\
-The first criterion ensure that cells intersection the surface are targeted for subdivision.
+The first criterion ensures that cells intersecting the surface are targeted for subdivision.
 
 The second criterion uses a size function, S, to measure local details density based on geometric curvature and flow kinematics:
 $
@@ -152,12 +149,12 @@ where $gamma_Phi = 4$ and $gamma_u = 3$ and.
 Since there are no solid boundaries in the simulation zone,
 the sizing function simplifies for a 2D simulation to:
 $
-  S = 4|nabla^2 Phi| + 2 sqrt(((partial u)/ (partial x))^2 + ((partial v)/ (partial y))^2)
+  S = 4|nabla^2 Phi| + 3 sqrt(((partial u)/ (partial x))^2 + ((partial v)/ (partial y))^2)
 $
 This function represents both geometric complexity (surface curvature) and kinematic activity (velocity gradients).
 Consequently, regions with high curvature or rapid flow undergo finer subdivision.
 
-=== 3. Solve pressure
+=== Solving the Pressure <sec-pressure>
 Solving the pressure projection equation on adaptive, non-uniform grids has historically been a significant challenge.
 Traditional methods often required constructing boundary-conforming grids, Voronoi diagrams, or Power diagrams,
 which are geometrically complex and difficult to implement.
@@ -188,8 +185,8 @@ the chosen formulation ensures that the resulting discrete Laplacian matrix rema
 while yielding indistinguishable visual results. Maintaining an SPD system is highly advantageous,
 as it allows the pressure equation to be solved efficiently using linear solvers such as the Preconditioned Conjugate Gradient (PCG) method.
 
-== What did I do
-In this project, I implement the Eulerian/FLIP MAC simulator and an Eulerian Quadtree simulator using C++.
+== Project Scope
+In this project, I implemented the Eulerian/FLIP MAC simulator and an Eulerian Quadtree simulator using C++.
 Here's the environment requirement:
 - C++ 17+
 - CMake 3.14+
@@ -198,11 +195,10 @@ and used libraries:
 - raylib (for window display)
 - raygui (for GUI)
 - Eigen  (for PCG solving)
-All codes are written by myself and AI since I didn't find the source code.
 
-In Quadtree simulator, I implement pressure solver, surface tension, MLS interpolation and redistancing in this paper.
-I didn't implement the smooth method in paper because I didn't understand how to do that.
-So I implement simpler but hard to parallelize one.
+Because the original source code was not publicly available, the entire codebase was developed from scratch, with assistance from AI tools to accelerate the implementation.
+
+In the Quadtree simulator, I successfully implemented the pressure solver, surface tension, Moving Least Squares (MLS) interpolation, and the level-set redistancing algorithm described in the paper. However, the surface smoothing method proposed by the authors was omitted due to its complexity. Instead, I implemented a simpler alternative, though it presents greater challenges for parallelization.
 
 = Implementation
 == MAC grid
@@ -224,8 +220,8 @@ The simulation pipeline of Eulerian method is:
 3. Solve pressure and update velocity
 4. Velocity extrapolate
 
-==== 1. Advect Datas
-To use semi-Lagrangian method advect data, we first calculate position of cell center in last frame.
+==== 1. Data Advection
+To advect data using the semi-Lagrangian method, we first calculate position of cell center in last frame.
 Then use bilinear interpolation to get value from that position. \
 The pseudo code look like:
 ```c
@@ -244,7 +240,7 @@ field[(x, y)] = bilerp(field_old, x_prev, y_prev);
 ```
 
 ==== 2. Apply Gravity and Surface Tension
-Apply gravity is easy, just add gravity force to all horizontal edges (store vertical velocity).
+Apply gravity is straightforward, just add gravity force to all horizontal edges (store vertical velocity).
 ```py
 G: gravity constant
 
@@ -253,13 +249,14 @@ for all horizontal edges e:
     e.velo += G * dt
 ```
 We use CSF (Continuum Surface Force) model to calculate surface tension.
-Since this is just a additional part of our simulator, I just briefly introduce it.
-It contain 4 steps:
+Since this is just an additional feature of our simulator, I just briefly introduce it.
+It contains 4 steps:
 1. Initialize color field by density and Jacobi smooth it.
 2. Calculate unit normal.
 3. Calculate curvature using divergence of normal.
 4. Calculate surface tension and apply it.
 
+#pagebreak()
 ==== 3. Solve pressure
 Recall our equation. If we merge $Delta t$ to $p$, it will become:
 $
@@ -289,10 +286,10 @@ $
 $
 
 ==== 4. Velocity Extrapolate
-Since we advect data using semi-Lagrangian method, some sample points may in the air cell around the surface.
+Since we advect data using semi-Lagrangian method, some sample points may be in the air cell around the surface.
 If the air cell's edges don't have velocity, the interpolate result will be affected.
 To solve this problem, we can propagate velocity from surface to air for a few grids.
-Use BFS can complete this task.
+A Breadth-First Search (BFS) was implemented to complete this velocity propagation task.
 
 === FLIP
 A major drawback of Eulerian method is its inherent numerical diffusion, which washes away fine structures over time.
@@ -314,7 +311,7 @@ The only difference is about how to manipulate particles.
 ==== 1. Transfer velocity between grid and particles
 We simply use bilinear interpolation and distribution to transfer velocity between grid and particles.
 ==== 2. Advect particles
-Since we have particle now, advect just like particle simulation. We update particles' position by it's velocity.
+Since we have particle now, advect just like particle simulation. We update particles' position by its velocity.
 ```
 p.x += p.u * dt
 p.y += p.v * dt
@@ -343,17 +340,18 @@ The simulation pipeline is:
 4. Extrapolate velocity from fluid cells to nearby air cells (same as MAC, on adaptive edges).
 5. Reconstruct $Phi$ via redistancing.
 
-Steps 2, 4, and 5 follow the same principles as in MAC but operate on the adaptive edge and leaf structures.
-The key implementation differences lie in step 1 (tree construction) and step 3 (pressure discretization).
+Steps 2 and 4 follow the same principles as in MAC but operate on the adaptive edge and leaf structures.
+The key implementation differences lie in step 1 (tree construction), step 3 (pressure discretization),
+and step 5 (redistance).
 
 === Building a New Tree Each Frame
 
-The tree reconstruction consists of eight sub-steps, starting from the existing tree
+The tree reconstruction consists of six sub-steps, starting from the existing tree
 and producing a fully refined new tree with all data advected.
 
 ==== 1. Computing the Size Function
 
-We compute $S$ for each leaf using the formula from section 1.2. The Laplacian of $Phi$ uses
+We compute $S$ for each leaf using the formula from @sec-subdivide. The Laplacian of $Phi$ uses
 non-uniform finite differences to account for varying neighbor cell sizes ($L_"dis"$, $R_"dis"$, etc.
 are the distances to each neighbor). The velocity gradients
 $(partial u) / (partial x)$ and $(partial v) / (partial y)$ are estimated from the leaf's adjacent u and v edges.
@@ -363,9 +361,11 @@ d2f_dx2 = 2 * (L_phi / (L_dis * (L_dis + R_dis))
             - leaf.phi / (L_dis * R_dis)
             + R_phi / (R_dis * (L_dis + R_dis)))
 d2f_dy2 = ... // computed similarly with D/U
-
 S_geo = gamma_phi * |d2f_dx2 + d2f_dy2|
-S_vel = gamma_u * sqrt((leaf.ul - leaf.ur)^2 + (leaf.vl - leaf.vr)^2)
+
+u_diff <- difference of horizontal velocity
+v_diff <- difference of vertical velocity
+S_vel = gamma_u * sqrt(u_diff^2 + v_diff^2)
         / leaf.size
 
 S_new = S_geo + S_vel
@@ -376,7 +376,7 @@ S = max(R_t * S_advected, S_new)  // R_t = 0.9^(dt / 0.01)
 
 ==== 2. Propagating the Size Function
 
-To avoid abrupt refinement changes, we smooth $S$ over 5 iterations via area-weighted
+To avoid abrupt refinement changes, we propagate $S$ over 5 iterations via area-weighted
 averaging with neighbors:
 ```c
 for iter in 1..5:
@@ -391,80 +391,75 @@ for iter in 1..5:
 
 ==== 3. Recursive Tree Subdivision
 
-We allocate a new root and recursively subdivide using the two criteria from section 1.2
-($|Phi| < "size"$ and $S > 1 / "size"$). The minimum cell size is capped at `1.5`.
+We allocate a new root and recursively subdivide using the two criteria from @sec-subdivide
+($|Phi| < "size"$ and $S > 1 / "size"$).
+My code can only handle square simulation zone with power of 2 side length, so the minimum cell size will be 1.
 $Phi$ and $S$ at child nodes are obtained via MLS interpolation from the old tree.
 User water add/delete interactions merge a circle SDF into $Phi$ during this traversal.
 ```c
 recursiveBuildTree(node):
-    if node is smallest: return
+    if node.size < 1.5: return
 
     exp_phi = advect(node.x, node.y)    // semi-Lagrangian from old tree
     exp_S   = MLSinterpolate(node.x, node.y)
     if user_interaction: exp_phi = merge(circleSDF, exp_phi)
+
     if |exp_phi| < node.size and exp_S > 1/node.size:
         subdivide(node)  // allocate 4 children, inherit parent edge ids
         for child in children: recursiveBuildTree(child)
 ```
 
-==== 4. Smoothing (Balancing) the Tree
+==== 4. Smoothing the Tree
 
-A min-heap of node size to check if adjacent leaves satisfy $|"depth"_a - "depth"_b| <= 1$.
+We utilize a min-heap based on node sizes to enforce the 2:1 depth ratio constraint,
+ensuring that adjacent leaves satisfy $|"depth"_a - "depth"_b| <= 1$.
 When a leaf detects a neighbor more than one level coarser,
 that neighbor is subdivided. This bounds T-junctions to at most two small cells meeting
 one large cell, keeping the pressure stencil tractable.
 
-==== 5--6. Caching Leaves and Neighbors
-
-Leaves are collected into a flat array via the parallel prefix-sum pattern (section 2.4).
-A `leaf_table` maps any integer grid coordinate to its containing leaf in $O(1)$. For each leaf,
-eight probe points (two per direction) query the table to build `cached_neighbors_idx` and
-per-direction `neighbor_cnt[4]`. This precomputation amortizes neighbor lookups used throughout
-the pipeline.
-
-==== 7. Finding All Edges
+==== 5. Finding All Edges
 
 This step translates the cell-centered tree into staggered (MAC-style) velocity edges.
 For each leaf, we iterate over its four faces (left, up, right, down) and decide whether
 to create a new edge or reuse an existing one from a neighbor.
 
-First, we adopt a **face ownership rule**: when two equal-depth cells share a face,
+First, we adopt a *face ownership rule*: when two equal-depth cells share a face,
 only the right/bottom cell creates the edge; the left/top cell will reuse that edge.
 This avoids creating duplicate edges at regular interfaces.
 
-From large to small, for each leaf face, we examine the cached `neighbor_cnt[dir]`:
-- **No neighbor**: The face is on the domain boundary. Create an edge with
+For each leaf face from large to small, we examine its neighbor:
+- *No neighbor*: The face is on the domain boundary. Create an edge with
   `solid_fraction = 1`, the leaf itself as the sole adjacent cell, and gradient
   coefficient ${0}$ (the face carries zero velocity regardless of pressure).
-- **Two smaller neighbors (T-junction)**: The face spans this leaf on one side and
+- *Two smaller neighbors (T-junction)*: The face spans this leaf on one side and
   two smaller leaves on the other. Create an edge with three adjacent cells---this
   leaf plus the two smaller neighbors---using the T-junction gradient stencil
-  $"sign" dot [-1, 1/2, 1/2] / (1.5 Delta x)$ from section 1.3. The smaller
-  leaves' coefficients are both $0.5$, and the larger leaf's coefficient is $-1$
-  (or $+1$, flips by face direction).
-- **One neighbor**:
+  $"sign" dot [-1, 1/2, 1/2] / (1.5 Delta x)$ from @sec-pressure The smaller
+  leaves' coefficients are both $0.5$, and the larger leaf's coefficient is $-1$.
+- *One neighbor*:
   - If the neighbor has the same depth and we are on the right or bottom face
     (`dir > 1`): create a regular edge with two adjacent cells and the
-    $[-1, 1] / Delta x$ stencil from section 1.3 (negated for left/top).
+    $[-1, 1] / Delta x$ stencil from @sec-pressure (negated for left/top).
   - If the neighbor has the same depth and we are on the left or top face
     (`dir <= 1`): this is an overlay case---the neighbor is the right/bottom
     cell that already owns this face. Reuse its existing edge id.
   - If the neighbor is larger (coarser): overlay case---our face maps to the
     larger neighbor's corresponding edge. Reuse that edge id.
 
-In the code, we first count how many edges each leaf will create, then allocate
-the u and v edge arrays and fill them. The overlay resolution is done in a
-separate pass after all edges are created.
+In the code, for parallelize, we first count how many edges each leaf will create,
+then allocate the u and v edge arrays and fill them.
+The overlay case is done in a separate pass after all edges are created.
 
-==== 8. Advecting Data to the New Tree
+==== 6. Advecting Data to the New Tree
 
 Cell-centered data ($Phi$, $S$) and edge velocities are advected via semi-Lagrangian
 backward trace + MLS interpolation from the old tree. Newly created edges skip this step
 and retain their initial zero velocity.
 
+#pagebreak()
 === Pressure Solve on the Adaptive Grid
 
-Recall the discrete system from section 1.3: $nabla^T [V A] [F nabla] p = nabla^T [V A] u^*$,
+Recall the discrete system from @sec-pressure $nabla^T [V A] [F nabla] p = nabla^T [V A] u^*$,
 where $V = 3 Delta x^2$, $A = 1 - "solid_fraction"$, and $F = max(W_k, 0.01)$.
 
 We first compute a `fluid_id` mapping (via prefix sum) to index only the $Phi < 0$ cells
@@ -493,23 +488,23 @@ for each face:
 
 === Level Set Maintenance
 
-The redistancing follows the two-stage approach from section 1.1, but adapted to the
+The redistancing follows the two-stage approach from @sec-surface, but adapted to the
 non-uniform quadtree.
 
 ==== Stage 1: Surface Cell Detection
 
-As described in section 1.1 step a, we check cached neighbors for opposite-sign $Phi$.
-The distance to interface is estimated by linear interpolation (the formula from section 1.1),
+As described in @sec-surface step a, we check cached neighbors for opposite-sign $Phi$.
+The distance to interface is estimated by linear interpolation (the formula from @sec-surface),
 scaled by the average of the two cell sizes $(L_i + L_j) / 2$ to account for non-uniform resolution:
 $
   Phi_"i_new" = (|Phi_i|) / (|Phi_i| + |Phi_j|) dot (L_i + L_j) / 2
 $
-Known surface cells are collected into a contiguous array via parallel prefix sum,
+Known surface cells are collected into a contiguous array,
 with each known cell's signed $Phi$ serving as the initial boundary condition for FMM.
 
 ==== Stage 2: Fast Marching Method
 
-This implements step b from section 1.1. A min-heap initialized with known surface cells
+This implements step b from @sec-surface A min-heap initialized with known surface cells
 propagates $Phi$ outward. The per-neighbor Eikonal solve differs from the uniform case:
 each axis may have a different effective grid spacing $h$ (average of the two cell sizes).
 ```c
@@ -530,63 +525,35 @@ else:
 ```
 After FMM completes, `phi_new` replaces `phi` for all leaves.
 
-=== EXNBFLIP
-
-The EXNBFLIP simulator extends the QT Eulerian with Lagrangian particles, reusing the
-FLIP-PIC blending and resampling logic from section 2.1.2. The key additions are:
-
-1. `particleToGrid()`: Particles scatter velocity to the finest edges (`size <= 1.5`)
-  via bilinear weighting within a 1.5-cell search radius. A spatial hash grid provides
-  $O(1)$ particle lookup per edge.
-2. `gridToParticle()`: Same FLIP-PIC blend as MAC FLIP, but velocity interpolation
-  uses MLS instead of bilinear.
-3. `advectParticles()`: RK2 midpoint method with MLS velocity queries.
-4. `resampleParticles()`: Deletes particles in deep interior ($Phi < -3 times "size"$),
-  seeds new ones in under-populated surface cells, checking $Phi < -0.1 times "size"$
-  before placement.
-
-However, EXNBFLIP is currently incomplete. The `reconstructSurface()` function---which
-should rebuild $Phi$ from particle positions after advection---has its core update logic
-commented out. Without this, the level set drifts from the particle distribution over time,
-and the simulation does not yet produce correct results.
 
 == Optimizations
 
-In both the uniform MAC and adaptive Quadtree simulators, several optimization strategies
+In both the uniform MAC and Quadtree simulators, several optimization strategies
 were employed to achieve real-time performance at moderate grid resolutions.
 
 === Reducing Memory Allocation Overhead
 
-In MAC: All field arrays (`u`, `v`, `density`, `cell_type`, etc.) are pre-allocated once
-in the constructor and reused across frames via `std::fill`. The Eigen triplet list is
-pre-reserved with capacity `nx * ny * 5`. The per-thread triplet vectors used in the
-pressure assembly are declared `static` so they persist across frames.
+In both MAC and Quadtree simulator, all vectors utilized during simulation will be
+declared as a member variable to prevent memory reallocation.
 
-In QT: The tree nodes are stored in `node_pool[2]`---a double buffer where `root_list`
-toggles between 0 and 1 each frame. At the start of `buildNewTree`, the new tree's pool
-is `clear()`ed and reused, avoiding repeated deallocation. The `leaf_table` and various
-offset arrays (`leaf_fluid_id_offset`, `leaf_offset`, `node_offset`) are persistent and
-resized only when the leaf count grows. Thread-local variables (`visited` flags,
-`cell_points`, `u_samples`, `v_samples`, `visited_u_faces`, `visited_v_faces`) are
-declared with `thread_local` and grown on demand, preventing per-frame allocation
-in the hot MLS interpolation path. Edge mirroring uses an epoch-based visited-faces
-scheme ($O(1)$ clear via incrementing a `uint64_t` counter) to deduplicate samples
-without resetting arrays.
+In Quadtree simulation. The tree nodes are stored in `node_pool`---a double buffer where `root_list` toggles between 0 and 1 each frame.
+At the start of building new tree, the `node_pool[1 - root_list]` is cleared and reused, avoiding repeated deallocation.
+And in MLS interpolation, edge mirroring uses an epoch-based visited-faces
+scheme ($O(1)$ clear via incrementing a `uint64_t` counter) to deduplicate samples without resetting arrays.
 
 === OpenMP Parallelization
 
-Both simulators use `#pragma omp parallel for` extensively. Key parallelized regions:
+Both simulators use `#pragma omp parallel for` extensively for all simple for loop parallelization.
 
-- **MAC**: Advection of u, v, and density run concurrently via `nowait`. Surface tension
-  Jacobi smoothing, normal computation, and curvature calculation are all parallelized.
-  The pressure matrix assembly uses thread-local triplets with `#pragma omp for`.
-  Velocity extrapolation iterates BFS layers in parallel for u and v edges.
-- **QT**: Sizing function computation, propagation iterations, leaf caching, neighbor
-  caching, edge finding (both passes), data advection to the new tree, gravity,
-  surface tension, pressure assembly, velocity extrapolation, and redistancing are all
-  parallelized. The pressure velocity update processes u and v edges concurrently
-  using `nowait`.
+=== Caching Leaves and Neighbors
 
+Leaves are collected into a flat array.
+A leaf table maps any integer grid coordinate to its containing leaf in $O(1)$.
+For each leaf, eight probe points (two per direction) query the table to build cached neighbor and
+per-direction neighbor count. This precomputation amortizes neighbor lookups used throughout
+the pipeline.
+
+#pagebreak()
 === Parallel Prefix Sum Optimization
 
 The Quadtree simulator frequently needs to build compact arrays from sparsely marked
@@ -602,3 +569,49 @@ mapping for the pressure system), and `redistancing()` (collecting known surface
 for FMM initialization). While the sequential prefix sum is $O(N)$ and not parallelized,
 the surrounding marking and scattering steps are fully parallel, yielding a significant
 speedup over atomic-push alternatives.
+
+= Result
+
+== MAC Simulator
+Based on testing, the PCG solver's tolerance error needs to be less than 0.1 to produce visually correct behavior.
+The main bottleneck in the MAC simulator is the PCG solver. It often requires hundreds of iterations, depending on the size of the simulation area.
+The simulator runs at approximately 30 FPS at a 512x512 resolution.
+
+== Quadtree Simulator
+Unlike the MAC simulator, the PCG solver is not the main bottleneck. It only needs about 20 iterations to reach an error of $10^{-3}$ (which is better than the MAC simulator).
+However, it only runs at about 15 FPS at a 512x512 resolution.
+After profiling, I found that the main costs come from parallelization and MLS interpolation.
+Since this simulator has more serial steps, we need to use different parallel algorithms.
+Also, MLS interpolation is a heavy calculation. Since the system automatically falls back to bilinear/trilinear interpolation anyway, we should implement a faster calculation for these fallback cases instead of using MLS.
+
+#align(center)[
+  #table(
+    columns: (auto, auto, auto, auto, auto),
+    inset: 10pt,
+    align: center + horizon,
+    [*Simulator*], [*Resolution*], [*PCG Iterations*], [*Frame Rate*], [*Main Bottleneck*],
+    [Uniform MAC], [512x512], [100+], [~30 FPS], [PCG Linear Solver],
+    [Adaptive QT], [512x512], [~20], [~15 FPS], [Tree Rebuild & MLS],
+  )
+]
+
+= Limitations & Future Work
+
+While the Eulerian solvers perform robustly, the Lagrangian particle extension (EXNBFLIP) remains incomplete. The primary challenge lies in reconstructing a smooth, continuous signed distance field (SDF) $Phi$ from discrete particle distributions.
+
+Simply calculating the minimum distance to the nearest particle in water cells does not yield a correct level set, as particles often cluster unevenly. Although assigning a predefined radius to each particle is a common alternative, finding an optimal kernel radius that prevents both artificial surface volume loss and numerical noise proved difficult during development.
+
+Furthermore, particle resampling introduces stability challenges. Since the surface is reconstructed dynamically from the particle layout, any noise that accidentally places a resampled particle in the air zone ($Phi > 0$) causes the surface to continuously expand outward. This artifact propagates across frames, eventually filling the entire simulation domain with phantom fluid.
+
+In future work, I plan to address these limitations by:
+1. Implementing a more robust narrow-band particle-to-level-set projection method.
+2. Exploring alternative surface-smoothing algorithms on the adaptive grid.
+3. Optimizing the MLS interpolation step to reduce the serial processing overhead in the Quadtree simulator.
+
+= Conclusion
+
+In this project, I implemented and evaluated both a uniform MAC-grid fluid simulator and an adaptive Quadtree-grid fluid simulator based on the state-of-the-art formulation by Ando and Batty (2020).
+
+The uniform MAC simulator achieves interactive framerates (30 FPS at $512 times 512$) but suffers from high iteration counts in the PCG solver due to the large grid size. Conversely, the Quadtree simulator demonstrates exceptional efficiency in pressure projection, requiring only about 20 iterations to reach $10^(-3)$ tolerance. However, its overall performance is bounded at approximately 15 FPS due to the computational overhead of dynamic tree reconstruction, parallelization bottlenecks in serial steps, and heavy MLS interpolations.
+
+This project provided valuable hands-on experience in solving the Navier-Stokes equations, managing complex data structures on adaptive grids, and identifying system bottlenecks through profiling.

@@ -332,7 +332,7 @@ then we random sample needed particles number and bilinear interpolate velocity 
 
 == Quadtree Grid
 
-The QT simulator rebuilds the entire quadtree from scratch each frame.
+The QT(Quadtree) simulator rebuilds the entire quadtree from scratch each frame.
 The simulation pipeline is:
 1. Build a new quadtree refined around the surface and high-velocity regions.
 2. Apply gravity and surface tension on the new edges.
